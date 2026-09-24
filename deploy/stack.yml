@@ -1,14 +1,12 @@
 services:
   whisper:
     image: ghcr.io/ggml-org/whisper.cpp@sha256:56bbe81d2dc2e0bc886b6071efece9f1a4f2d0e8ed578db9f59a8cfcb1f2bf95
-    command: >-
-      set -e;
-      test -s /models/ggml-small.bin || ./models/download-ggml-model.sh small /models;
-      exec ./build/bin/whisper-server
-      --model /models/ggml-small.bin
-      --host 0.0.0.0 --port 8082
-      --inference-path /v1/audio/transcriptions
-      --convert --threads 2
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -e
+        test -s /models/ggml-small.bin || ./models/download-ggml-model.sh small /models
+        exec ./build/bin/whisper-server           --model /models/ggml-small.bin           --host 0.0.0.0 --port 8082           --inference-path /v1/audio/transcriptions           --convert --threads 2
     volumes:
       - whisper_models:/models
     networks:
@@ -90,11 +88,13 @@ services:
         failure_action: rollback
       labels:
         - traefik.enable=true
+        - traefik.docker.network=web
         - traefik.http.routers.transcription-mcp.rule=Host(`mcp-origin.conexaoazul.com`) && PathPrefix(`/transcribe`)
         - traefik.http.routers.transcription-mcp.entrypoints=websecure
         - traefik.http.routers.transcription-mcp.tls=true
         - traefik.http.routers.transcription-mcp.priority=230
         - traefik.http.middlewares.transcription-mcp-strip.stripprefix.prefixes=/transcribe
+        - traefik.http.middlewares.transcription-mcp-strip.stripprefix.forceSlash=true
         - traefik.http.routers.transcription-mcp.middlewares=transcription-mcp-strip
         - traefik.http.services.transcription-mcp.loadbalancer.server.port=8083
 
