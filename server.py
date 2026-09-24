@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 import feedparser
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 WHISPER_URL = os.environ.get(
     "WHISPER_URL", "http://host.docker.internal:8082/v1/audio/transcriptions"
@@ -43,10 +44,34 @@ ALLOWED_INPUT_ROOTS = tuple(
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(500 * 1024 * 1024)))
 MAX_INLINE_BYTES = int(os.environ.get("MAX_INLINE_BYTES", str(25 * 1024 * 1024)))
 
+MCP_ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get(
+        "MCP_ALLOWED_HOSTS",
+        "127.0.0.1:*,localhost:*",
+    ).split(",")
+    if h.strip()
+]
+MCP_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "MCP_ALLOWED_ORIGINS",
+        "http://127.0.0.1:*,http://localhost:*",
+    ).split(",")
+    if origin.strip()
+]
+
 Format = Literal["text", "json", "srt", "vtt", "md"]
 WHISPER_FORMAT = {"text": "json", "json": "verbose_json", "srt": "srt", "vtt": "vtt", "md": "verbose_json"}
 
-mcp = FastMCP("whisper-transcribe")
+mcp = FastMCP(
+    "whisper-transcribe",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=MCP_ALLOWED_HOSTS,
+        allowed_origins=MCP_ALLOWED_ORIGINS,
+    ),
+)
 
 
 # ---------------- validation helpers ----------------------------------------

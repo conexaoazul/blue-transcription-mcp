@@ -45,6 +45,8 @@ services:
       PORT: "8083"
       WHISPER_URL: http://whisper:8082/v1/audio/transcriptions
       MCP_AUTH_TOKEN_FILE: /run/secrets/transcription_mcp_auth
+      MCP_ALLOWED_HOSTS: mcp-origin.conexaoazul.com,mcp-origin.conexaoazul.com:*,10.77.0.4:*,127.0.0.1:*,localhost:*
+      MCP_ALLOWED_ORIGINS: https://mcp-origin.conexaoazul.com,http://10.77.0.4:*,http://127.0.0.1:*,http://localhost:*
       ALLOWED_INPUT_ROOTS: /data/inbox
       OUTPUT_DIR: /data/output
       MAX_DOWNLOAD_BYTES: "524288000"
