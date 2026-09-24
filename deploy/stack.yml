@@ -26,11 +26,11 @@ services:
           - node.hostname == blueops-oci-worker-1
       resources:
         reservations:
-          cpus: "1.25"
-          memory: 1536M
+          cpus: "0.25"
+          memory: 512M
         limits:
           cpus: "2.00"
-          memory: 3072M
+          memory: 2048M
       restart_policy:
         condition: on-failure
         delay: 10s
