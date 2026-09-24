@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 RUN pip install --no-cache-dir \
-    "mcp[cli]>=1.2.0" \
+    "mcp[cli]==1.29.0" \
     httpx \
     yt-dlp \
     feedparser
