@@ -54,6 +54,8 @@ services:
     secrets:
       - source: transcription_mcp_auth
         target: transcription_mcp_auth
+        uid: "1000"
+        gid: "1000"
         mode: 0400
     volumes:
       - transcription_inbox:/data/inbox:ro
