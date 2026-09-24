@@ -58,9 +58,13 @@ services:
     volumes:
       - transcription_inbox:/data/inbox:ro
       - transcription_output:/data/output
+    ports:
+      - target: 8083
+        published: 18083
+        protocol: tcp
+        mode: host
     networks:
       - transcribe
-      - web
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8083/healthz', timeout=3).read()"]
       interval: 30s
@@ -86,25 +90,10 @@ services:
         parallelism: 1
         order: start-first
         failure_action: rollback
-      labels:
-        - traefik.enable=true
-        - traefik.docker.network=web
-        - traefik.http.routers.transcription-mcp.rule=Host(`mcp-origin.conexaoazul.com`) && PathPrefix(`/transcribe`)
-        - traefik.http.routers.transcription-mcp.entrypoints=websecure
-        - traefik.http.routers.transcription-mcp.tls=true
-        - traefik.http.routers.transcription-mcp.priority=230
-        - traefik.http.middlewares.transcription-mcp-strip.stripprefix.prefixes=/transcribe
-        - traefik.http.middlewares.transcription-mcp-strip.stripprefix.forceSlash=true
-        - traefik.http.routers.transcription-mcp.middlewares=transcription-mcp-strip
-        - traefik.http.services.transcription-mcp.loadbalancer.server.port=8083
-
 networks:
   transcribe:
     driver: overlay
     attachable: true
-  web:
-    external: true
-
 volumes:
   whisper_models:
   transcription_inbox:
