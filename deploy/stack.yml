@@ -1,0 +1,113 @@
+services:
+  whisper:
+    image: ghcr.io/ggml-org/whisper.cpp@sha256:56bbe81d2dc2e0bc886b6071efece9f1a4f2d0e8ed578db9f59a8cfcb1f2bf95
+    command: >-
+      set -e;
+      test -s /models/ggml-small.bin || ./models/download-ggml-model.sh small /models;
+      exec ./build/bin/whisper-server
+      --model /models/ggml-small.bin
+      --host 0.0.0.0 --port 8082
+      --inference-path /v1/audio/transcriptions
+      --convert --threads 2
+    volumes:
+      - whisper_models:/models
+    networks:
+      - transcribe
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo >/dev/tcp/127.0.0.1/8082'"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 180s
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == blueops-oci-worker-1
+      resources:
+        reservations:
+          cpus: "1.25"
+          memory: 1536M
+        limits:
+          cpus: "2.00"
+          memory: 3072M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+
+  mcp:
+    image: ghcr.io/conexaoazul/blue-transcription-mcp:${IMAGE_TAG:?set IMAGE_TAG}
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      TRANSPORT: http
+      HOST: 0.0.0.0
+      PORT: "8083"
+      WHISPER_URL: http://whisper:8082/v1/audio/transcriptions
+      MCP_AUTH_TOKEN_FILE: /run/secrets/transcription_mcp_auth
+      ALLOWED_INPUT_ROOTS: /data/inbox
+      OUTPUT_DIR: /data/output
+      MAX_DOWNLOAD_BYTES: "524288000"
+      MAX_INLINE_BYTES: "26214400"
+    secrets:
+      - source: transcription_mcp_auth
+        target: transcription_mcp_auth
+        mode: 0400
+    volumes:
+      - transcription_inbox:/data/inbox:ro
+      - transcription_output:/data/output
+    networks:
+      - transcribe
+      - web
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8083/healthz', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == blueops-oci-worker-1
+      resources:
+        reservations:
+          cpus: "0.10"
+          memory: 128M
+        limits:
+          cpus: "0.50"
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      update_config:
+        parallelism: 1
+        order: start-first
+        failure_action: rollback
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.transcription-mcp.rule=Host(`mcp-origin.conexaoazul.com`) && PathPrefix(`/transcribe`)
+        - traefik.http.routers.transcription-mcp.entrypoints=websecure
+        - traefik.http.routers.transcription-mcp.tls=true
+        - traefik.http.routers.transcription-mcp.priority=230
+        - traefik.http.middlewares.transcription-mcp-strip.stripprefix.prefixes=/transcribe
+        - traefik.http.routers.transcription-mcp.middlewares=transcription-mcp-strip
+        - traefik.http.services.transcription-mcp.loadbalancer.server.port=8083
+
+networks:
+  transcribe:
+    driver: overlay
+    attachable: true
+  web:
+    external: true
+
+volumes:
+  whisper_models:
+  transcription_inbox:
+  transcription_output:
+
+secrets:
+  transcription_mcp_auth:
+    external: true

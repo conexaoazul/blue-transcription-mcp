@@ -7,6 +7,8 @@ File outputs land in the Obsidian Transcripts folder.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hmac
 import ipaddress
 import json
@@ -39,6 +41,7 @@ ALLOWED_INPUT_ROOTS = tuple(
     if p
 )
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(500 * 1024 * 1024)))
+MAX_INLINE_BYTES = int(os.environ.get("MAX_INLINE_BYTES", str(25 * 1024 * 1024)))
 
 Format = Literal["text", "json", "srt", "vtt", "md"]
 WHISPER_FORMAT = {"text": "json", "json": "verbose_json", "srt": "srt", "vtt": "vtt", "md": "verbose_json"}
@@ -315,6 +318,31 @@ async def transcribe_file(path: str, format: Format = "text", language: str | No
 
 
 @mcp.tool()
+async def transcribe_base64(
+    filename: str, data_base64: str, format: Format = "text", language: str | None = None
+) -> str:
+    """Transcribe inline base64 audio/video data.
+
+    Intended for MCP clients that have attachment bytes but no shared filesystem or public URL.
+    The decoded payload is capped by MAX_INLINE_BYTES (25 MiB by default).
+    """
+    safe_name = Path(filename).name or "attachment.bin"
+    try:
+        raw = base64.b64decode(data_base64, validate=True)
+    except (binascii.Error, ValueError):
+        return "Rejected: invalid base64 payload"
+    if len(raw) > MAX_INLINE_BYTES:
+        return f"Rejected: decoded payload exceeds {MAX_INLINE_BYTES} bytes"
+    with tempfile.TemporaryDirectory() as td:
+        local = Path(td) / safe_name
+        local.write_bytes(raw)
+        response = await _post_to_whisper(local, format, language)
+        return _format_result(
+            response, format, title=local.stem, source=safe_name, source_kind="inline_base64"
+        )
+
+
+@mcp.tool()
 async def transcribe_url(url: str, format: Format = "text", language: str | None = None) -> str:
     """Transcribe audio from an http(s) URL (direct link to mp3/wav/m4a/etc).
 
@@ -414,6 +442,13 @@ if __name__ == "__main__":
         from starlette.responses import JSONResponse
 
         token = os.environ.get("MCP_AUTH_TOKEN", "").strip()
+        token_file = os.environ.get("MCP_AUTH_TOKEN_FILE", "").strip()
+        if not token and token_file:
+            try:
+                token = Path(token_file).read_text().strip()
+            except OSError as exc:
+                sys.stderr.write(f"FATAL: unable to read MCP_AUTH_TOKEN_FILE: {exc}\n")
+                sys.exit(1)
         if not token:
             sys.stderr.write(
                 "FATAL: MCP_AUTH_TOKEN is empty or unset. "
@@ -425,6 +460,8 @@ if __name__ == "__main__":
 
         class BearerAuth(BaseHTTPMiddleware):
             async def dispatch(self, request, call_next):
+                if request.url.path == "/healthz":
+                    return await call_next(request)
                 hdr = request.headers.get("authorization", "").encode()
                 # Constant-time compare to avoid token-length timing oracles.
                 if not hmac.compare_digest(hdr, expected):
@@ -436,6 +473,11 @@ if __name__ == "__main__":
         _ensure_output_dir()
 
         app = mcp.streamable_http_app()
+
+        async def healthz(_request):
+            return JSONResponse({"status": "ok"})
+
+        app.add_route("/healthz", healthz, methods=["GET"])
         app.add_middleware(BearerAuth)
         host = os.environ.get("HOST", "0.0.0.0")
         port = int(os.environ.get("PORT", "8083"))
