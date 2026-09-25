@@ -37,8 +37,6 @@ services:
     image: ghcr.io/conexaoazul/blue-transcription-mcp:${IMAGE_TAG:?set IMAGE_TAG}
     user: "1000:1000"
     read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,size=512m,mode=1777
     environment:
       TRANSPORT: http
       HOST: 0.0.0.0
@@ -49,6 +47,7 @@ services:
       MCP_ALLOWED_ORIGINS: https://mcp-origin.conexaoazul.com,http://10.77.0.4:*,http://127.0.0.1:*,http://localhost:*
       ALLOWED_INPUT_ROOTS: /data/inbox
       OUTPUT_DIR: /data/output
+      TMPDIR: /data/output
       MAX_DOWNLOAD_BYTES: "524288000"
       MAX_INLINE_BYTES: "26214400"
       MAX_BATCH_FILES: "100"
