@@ -23,7 +23,8 @@ Fork operacional de `MarcusTseng/mcp-whisper`, adaptado para Docker Swarm.
 ## Segurança
 
 - MCP exige Bearer token e lê o segredo de `/run/secrets/transcription_mcp_auth`.
-- Container MCP roda non-root, rootfs read-only e `/tmp` em tmpfs.
+- Container MCP roda non-root e rootfs read-only; temporários usam `TMPDIR=/data/output`.
+- A imagem inicializa `/data/output` com ownership UID 1000; `/healthz` valida escrita no volume.
 - URLs remotas mantêm as proteções SSRF do upstream.
 - `transcribe_file`, `transcribe_batch` e `transcribe_zip` são restritos a `/data/inbox`.
 - ZIP usa basename sanitizado, rejeita symlink e impõe limites de arquivo/expansão.

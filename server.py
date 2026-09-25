@@ -722,7 +722,12 @@ if __name__ == "__main__":
         app = mcp.streamable_http_app()
 
         async def healthz(_request):
-            return JSONResponse({"status": "ok"})
+            output_writable = OUTPUT_DIR.exists() and os.access(OUTPUT_DIR, os.W_OK)
+            status = "ok" if output_writable else "degraded"
+            return JSONResponse(
+                {"status": status, "output_writable": output_writable},
+                status_code=200 if output_writable else 503,
+            )
 
         app.add_route("/healthz", healthz, methods=["GET"])
         app.add_middleware(BearerAuth)

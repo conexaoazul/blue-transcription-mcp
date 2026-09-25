@@ -16,7 +16,8 @@ COPY server.py /app/server.py
 
 # Non-root user (UID 1000 matches host 'marcus' for bind-mount ownership).
 RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser \
-    && chown -R appuser:appuser /app
+    && mkdir -p /data/inbox /data/output \
+    && chown -R appuser:appuser /app /data
 
 ENV WHISPER_URL=http://host.docker.internal:8082/v1/audio/transcriptions
 ENV INPUT_DIR=/data
