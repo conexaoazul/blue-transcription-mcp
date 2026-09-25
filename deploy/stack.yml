@@ -38,7 +38,7 @@ services:
     user: "1000:1000"
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:rw,noexec,nosuid,size=512m,mode=1777
     environment:
       TRANSPORT: http
       HOST: 0.0.0.0
