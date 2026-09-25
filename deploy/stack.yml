@@ -95,7 +95,7 @@ services:
         delay: 5s
       update_config:
         parallelism: 1
-        order: start-first
+        order: stop-first
         failure_action: rollback
 networks:
   transcribe:
