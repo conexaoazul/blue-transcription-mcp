@@ -17,6 +17,7 @@ import re
 import socket
 import sys
 import tempfile
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -43,6 +44,21 @@ ALLOWED_INPUT_ROOTS = tuple(
 )
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(500 * 1024 * 1024)))
 MAX_INLINE_BYTES = int(os.environ.get("MAX_INLINE_BYTES", str(25 * 1024 * 1024)))
+MAX_BATCH_FILES = max(1, int(os.environ.get("MAX_BATCH_FILES", "100")))
+BATCH_CONCURRENCY = max(1, int(os.environ.get("BATCH_CONCURRENCY", "2")))
+MAX_BATCH_ITEM_BYTES = int(
+    os.environ.get("MAX_BATCH_ITEM_BYTES", str(250 * 1024 * 1024))
+)
+MAX_ZIP_EXTRACT_BYTES = int(
+    os.environ.get("MAX_ZIP_EXTRACT_BYTES", str(1024 * 1024 * 1024))
+)
+MAX_ZIP_ENTRIES = max(1, int(os.environ.get("MAX_ZIP_ENTRIES", "5000")))
+SUPPORTED_MEDIA_EXTENSIONS = frozenset(
+    {
+        ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".flac",
+        ".wma", ".mp4", ".webm", ".mkv", ".mov", ".avi", ".mpeg", ".mpg",
+    }
+)
 
 MCP_ALLOWED_HOSTS = [
     h.strip()
@@ -155,6 +171,18 @@ def _slugify(s: str, max_len: int = 80) -> str:
     s = re.sub(r"[^\w\s-]", "", s).strip()
     s = re.sub(r"[\s_-]+", "-", s)
     return s[:max_len] or "transcript"
+
+
+def _supported_media_name(name: str) -> bool:
+    """Return True when a filename has an explicitly allowed media extension."""
+    return Path(name).suffix.lower() in SUPPORTED_MEDIA_EXTENSIONS
+
+
+def _effective_batch_concurrency(requested: int | None) -> int:
+    """Clamp caller concurrency to the operator-defined ceiling."""
+    if requested is None:
+        return BATCH_CONCURRENCY
+    return max(1, min(int(requested), BATCH_CONCURRENCY))
 
 
 # ---------------- whisper.cpp client ----------------------------------------
@@ -318,6 +346,64 @@ async def _fetch_feed(rss_url: str) -> "feedparser.FeedParserDict":
     return feedparser.parse(body)
 
 
+# ---------------- batch helpers --------------------------------------------
+
+async def _run_batch(
+    items: list[tuple[Path, str, str, str]],
+    fmt: Format,
+    language: str | None,
+    concurrency: int | None,
+) -> dict:
+    """Transcribe validated items with bounded concurrency, preserving order."""
+    sem = asyncio.Semaphore(_effective_batch_concurrency(concurrency))
+
+    async def one(index: int, item: tuple[Path, str, str, str]) -> dict:
+        audio_path, source, source_kind, title = item
+        async with sem:
+            try:
+                response = await _post_to_whisper(audio_path, fmt, language)
+                result = _format_result(
+                    response,
+                    fmt,
+                    title=f"{index + 1:03d}-{title}",
+                    source=source,
+                    source_kind=source_kind,
+                )
+                return {
+                    "index": index,
+                    "source": source,
+                    "title": title,
+                    "status": "ok",
+                    "result": result,
+                }
+            except Exception as exc:
+                return {
+                    "index": index,
+                    "source": source,
+                    "title": title,
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+
+    results = await asyncio.gather(*(one(i, item) for i, item in enumerate(items)))
+    ok = sum(1 for row in results if row["status"] == "ok")
+    manifest = {
+        "count": len(results),
+        "ok": ok,
+        "failed": len(results) - ok,
+        "format": fmt,
+        "language": language,
+        "concurrency": _effective_batch_concurrency(concurrency),
+        "results": results,
+    }
+    out_dir = _ensure_output_dir()
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    manifest_path = out_dir / f"batch-{stamp}.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    manifest["manifest_path"] = str(manifest_path)
+    return manifest
+
+
 # ---------------- MCP tools -------------------------------------------------
 
 @mcp.tool()
@@ -365,6 +451,142 @@ async def transcribe_base64(
         return _format_result(
             response, format, title=local.stem, source=safe_name, source_kind="inline_base64"
         )
+
+
+@mcp.tool()
+async def transcribe_batch(
+    paths: list[str],
+    format: Format = "text",
+    language: str | None = None,
+    concurrency: int | None = None,
+) -> str:
+    """Transcribe multiple local audio/video files with bounded concurrency.
+
+    Every path must pass the same allowed-root validation as transcribe_file.
+    Unsupported extensions and oversized files are rejected before inference.
+    """
+    if not paths:
+        return "Rejected: paths must contain at least one file"
+    if len(paths) > MAX_BATCH_FILES:
+        return f"Rejected: batch has {len(paths)} files; limit is {MAX_BATCH_FILES}"
+
+    items: list[tuple[Path, str, str, str]] = []
+    try:
+        for raw_path in paths:
+            p = _validate_input_path(raw_path)
+            if not _supported_media_name(p.name):
+                raise ValidationError(f"Unsupported media extension: {p.name}")
+            size = p.stat().st_size
+            if size > MAX_BATCH_ITEM_BYTES:
+                raise ValidationError(
+                    f"File {p.name} is {size} bytes; item limit is {MAX_BATCH_ITEM_BYTES}"
+                )
+            items.append((p, str(p), "batch_file", p.stem))
+    except ValidationError as exc:
+        return f"Rejected: {exc}"
+
+    manifest = await _run_batch(items, format, language, concurrency)
+    return json.dumps(manifest, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def transcribe_zip(
+    path: str,
+    format: Format = "text",
+    language: str | None = None,
+    concurrency: int | None = None,
+) -> str:
+    """Safely extract and transcribe supported media files from a local ZIP."""
+    try:
+        zip_path = _validate_input_path(path)
+        if zip_path.suffix.lower() != ".zip" or not zipfile.is_zipfile(zip_path):
+            raise ValidationError("Input is not a valid .zip archive")
+        if zip_path.stat().st_size > MAX_BATCH_ITEM_BYTES:
+            raise ValidationError(
+                f"ZIP is {zip_path.stat().st_size} bytes; archive limit is {MAX_BATCH_ITEM_BYTES}"
+            )
+    except ValidationError as exc:
+        return f"Rejected: {exc}"
+
+    with tempfile.TemporaryDirectory() as td:
+        work = Path(td)
+        items: list[tuple[Path, str, str, str]] = []
+        extracted_total = 0
+
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                infos = zf.infolist()
+                if len(infos) > MAX_ZIP_ENTRIES:
+                    raise ValidationError(
+                        f"ZIP has {len(infos)} entries; limit is {MAX_ZIP_ENTRIES}"
+                    )
+                for info in infos:
+                    if info.is_dir():
+                        continue
+                    mode = (info.external_attr >> 16) & 0o170000
+                    if mode == 0o120000:
+                        raise ValidationError(
+                            f"ZIP symlink entry is not allowed: {info.filename}"
+                        )
+
+                    safe_name = Path(info.filename.replace("\\", "/")).name
+                    if not safe_name or not _supported_media_name(safe_name):
+                        continue
+                    if len(items) >= MAX_BATCH_FILES:
+                        raise ValidationError(
+                            f"ZIP contains more than {MAX_BATCH_FILES} supported media files"
+                        )
+                    if info.file_size > MAX_BATCH_ITEM_BYTES:
+                        raise ValidationError(
+                            f"ZIP member {safe_name} is {info.file_size} bytes; "
+                            f"item limit is {MAX_BATCH_ITEM_BYTES}"
+                        )
+
+                    target = work / f"{len(items) + 1:03d}-{safe_name}"
+                    written = 0
+                    with zf.open(info, "r") as src, target.open("wb") as dst:
+                        while True:
+                            chunk = src.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            extracted_total += len(chunk)
+                            if written > MAX_BATCH_ITEM_BYTES:
+                                raise ValidationError(
+                                    f"ZIP member {safe_name} exceeded item limit while extracting"
+                                )
+                            if extracted_total > MAX_ZIP_EXTRACT_BYTES:
+                                raise ValidationError(
+                                    f"ZIP extraction exceeded {MAX_ZIP_EXTRACT_BYTES} bytes"
+                                )
+                            dst.write(chunk)
+
+                    items.append(
+                        (
+                            target,
+                            f"{zip_path}!{info.filename}",
+                            "zip_member",
+                            Path(safe_name).stem,
+                        )
+                    )
+        except (zipfile.BadZipFile, RuntimeError, OSError) as exc:
+            return f"Rejected: unable to read ZIP safely: {exc}"
+        except ValidationError as exc:
+            return f"Rejected: {exc}"
+
+        if not items:
+            return (
+                "Rejected: ZIP contains no supported media files. Supported extensions: "
+                + ", ".join(sorted(SUPPORTED_MEDIA_EXTENSIONS))
+            )
+
+        manifest = await _run_batch(items, format, language, concurrency)
+        manifest["archive"] = str(zip_path)
+        manifest["extracted_bytes"] = extracted_total
+        Path(manifest["manifest_path"]).write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False)
+        )
+        return json.dumps(manifest, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()

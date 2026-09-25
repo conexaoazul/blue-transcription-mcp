@@ -14,6 +14,8 @@ Fork operacional de `MarcusTseng/mcp-whisper`, adaptado para Docker Swarm.
 
 - `transcribe_file`
 - `transcribe_base64` (extensão Blue; até 25 MiB por padrão)
+- `transcribe_batch` (arquivos locais, concorrência limitada)
+- `transcribe_zip` (ZIP seguro; OPUS/OGG/M4A/MP3/WAV e vídeo suportado)
 - `transcribe_url`
 - `transcribe_youtube`
 - `transcribe_podcast`
@@ -23,7 +25,9 @@ Fork operacional de `MarcusTseng/mcp-whisper`, adaptado para Docker Swarm.
 - MCP exige Bearer token e lê o segredo de `/run/secrets/transcription_mcp_auth`.
 - Container MCP roda non-root, rootfs read-only e `/tmp` em tmpfs.
 - URLs remotas mantêm as proteções SSRF do upstream.
-- `transcribe_file` é restrito a `/data/inbox`.
+- `transcribe_file`, `transcribe_batch` e `transcribe_zip` são restritos a `/data/inbox`.
+- ZIP usa basename sanitizado, rejeita symlink e impõe limites de arquivo/expansão.
+- Batch inicia com concorrência máxima 1 no Swarm para proteger o worker OCI de 2 OCPU.
 
 ## Deploy
 
