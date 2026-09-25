@@ -51,6 +51,11 @@ services:
       OUTPUT_DIR: /data/output
       MAX_DOWNLOAD_BYTES: "524288000"
       MAX_INLINE_BYTES: "26214400"
+      MAX_BATCH_FILES: "100"
+      BATCH_CONCURRENCY: "1"
+      MAX_BATCH_ITEM_BYTES: "262144000"
+      MAX_ZIP_EXTRACT_BYTES: "536870912"
+      MAX_ZIP_ENTRIES: "5000"
     secrets:
       - source: transcription_mcp_auth
         target: transcription_mcp_auth
