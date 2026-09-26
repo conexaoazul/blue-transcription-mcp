@@ -107,7 +107,7 @@ services:
       WHISPER_MODEL: whisper-1
       MAX_UPLOAD_MB: "250"
       REQUEST_TIMEOUT: "1200"
-      WHISPER_RTF_ESTIMATE: "1.5"
+      WHISPER_RTF_ESTIMATE: "0.8"
       OUTPUT_DIR: /data/outputs
       TMPDIR: /data/outputs
       ALLOWED_ORIGINS: "*"
