@@ -45,7 +45,7 @@ ALLOWED_INPUT_ROOTS = tuple(
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(500 * 1024 * 1024)))
 MAX_INLINE_BYTES = int(os.environ.get("MAX_INLINE_BYTES", str(25 * 1024 * 1024)))
 MAX_BATCH_FILES = max(1, int(os.environ.get("MAX_BATCH_FILES", "100")))
-BATCH_CONCURRENCY = max(1, int(os.environ.get("BATCH_CONCURRENCY", "2")))
+BATCH_CONCURRENCY = max(1, int(os.environ.get("BATCH_CONCURRENCY", "1")))
 MAX_BATCH_ITEM_BYTES = int(
     os.environ.get("MAX_BATCH_ITEM_BYTES", str(250 * 1024 * 1024))
 )
