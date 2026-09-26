@@ -1,0 +1,21 @@
+diff --git a/Dockerfile b/Dockerfile
+index 8ea6826..f495029 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -20,9 +20,16 @@ COPY backend/app ./app
+ RUN pip install --no-cache-dir .
+ 
+ COPY --from=frontend /backend/static ./static
++COPY LICENSE /licenses/whisper-transcriber-LICENSE
++
++RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser \
++    && mkdir -p /data/outputs \
++    && chown -R appuser:appuser /app /data/outputs
+ 
+ ENV OUTPUT_DIR=/data/outputs
++ENV TMPDIR=/data/outputs
+ VOLUME ["/data/outputs"]
+ EXPOSE 8080
+ 
++USER appuser
+ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
