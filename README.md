@@ -1,6 +1,6 @@
 # mcp-whisper
 
-A local-first MCP server that exposes a whisper.cpp HTTP backend as seven
+A local-first MCP server that exposes a whisper.cpp HTTP backend as eight
 transcription tools, including safe local batch and ZIP ingestion, with bearer
 auth, SSRF guards, and a Docker MCP Toolkit catalog entry.
 
@@ -22,7 +22,8 @@ auth, SSRF guards, and a Docker MCP Toolkit catalog entry.
 | `transcribe_file(path, format, language?)` | Local audio/video file | Path must resolve under `ALLOWED_INPUT_ROOTS` |
 | `transcribe_base64(filename, data_base64, format, language?)` | Inline attachment bytes | Capped by `MAX_INLINE_BYTES` |
 | `transcribe_batch(paths, format, language?, concurrency?)` | Multiple local files | Bounded count/size/concurrency |
-| `transcribe_zip(path, format, language?, concurrency?)` | ZIP containing media | Safe basename extraction; symlink/zip-bomb guards |
+| `transcribe_zip(path, format, language?, concurrency?)` | Local ZIP containing media | Safe basename extraction; symlink/zip-bomb guards |
+| `transcribe_zip_base64(filename, data_base64, format, language?, concurrency?)` | Inline ZIP attachment bytes | Same ZIP safety gates; pre-decode size cap; archive/member SHA-256 manifest |
 | `transcribe_url(url, format, language?)` | Direct http(s) URL | Public hosts only |
 | `transcribe_youtube(url, format, language?)` | YouTube (yt-dlp) | URL validated *before* yt-dlp runs |
 | `transcribe_podcast(rss_url, episode_index, format, language?)` | RSS feed episode | Audio enclosure preferred; video fallback |
@@ -83,6 +84,7 @@ All knobs are environment variables (see `.env.example`):
 | `OUTPUT_DIR` | `/home/marcus/Documents/Obsidian Vault/Transcripts` | Where md/srt/vtt files are written |
 | `MAX_DOWNLOAD_BYTES` | `524288000` (500MB) | Cap for httpx + yt-dlp downloads |
 | `MAX_INLINE_BYTES` | `26214400` (25MB) | Decoded cap for inline base64 media |
+| `MAX_INLINE_ZIP_BYTES` | same as `MAX_INLINE_BYTES` | Decoded cap for inline base64 ZIP archives |
 | `MAX_BATCH_FILES` | `100` | Maximum media items accepted by batch/ZIP |
 | `BATCH_CONCURRENCY` | `2` | Operator ceiling for simultaneous batch inference |
 | `MAX_BATCH_ITEM_BYTES` | `262144000` (250MB) | Per-item limit for batch/ZIP |
@@ -118,7 +120,7 @@ docker mcp profile server add default \
 
 Then `whisper-transcribe` appears in Docker Desktop's MCP Toolkit panel and any
 client wired to the Docker MCP gateway (e.g. via `MCP_DOCKER` server) sees all
-seven tools.
+eight tools.
 
 ## Security model
 
@@ -131,6 +133,7 @@ Hardened in line with a Codex + Gemini cross-review. See [SECURITY.md](SECURITY.
 - `_validate_remote_url` rejects non-http(s) schemes, private/loopback/link-local IPs, and `host.docker.internal`; applied to all three remote tools *before* yt-dlp/httpx see the URL
 - **Fail-closed auth**: HTTP transport refuses to start if `MCP_AUTH_TOKEN` is unset; `hmac.compare_digest` for the check
 - **DoS cap**: 500MB ceiling on httpx streams; yt-dlp invoked with `--max-filesize 500M --no-config --no-call-home --no-cache-dir`
+- Inline base64 media/ZIP payloads are size-checked **before decode**; inline ZIP then reuses the same entry-count, symlink, extension, per-member and total-extraction gates as local ZIP ingestion
 - RSS feed fetched via httpx (validated, capped) — feedparser never does its own networking
 
 ## Weekly auto-updater
@@ -155,7 +158,7 @@ systemctl --user enable --now mcp-whisper-update.timer
 
 ```
 mcp-whisper/
-├── server.py              FastMCP server, 4 tools, dual stdio/http transport
+├── server.py              FastMCP server, 8 tools, dual stdio/http transport
 ├── Dockerfile             python:3.12-slim + ffmpeg + 5 pip deps, non-root user
 ├── compose.yml            Long-running HTTP daemon, narrow RO mounts
 ├── catalog-entry.yaml     Docker MCP Toolkit catalog server spec
