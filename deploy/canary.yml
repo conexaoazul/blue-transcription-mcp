@@ -74,6 +74,12 @@ services:
         uid: "1000"
         gid: "1000"
         mode: 0444
+    secrets:
+      - source: transcription_mcp_auth
+        target: transcription_mcp_auth
+        uid: "1000"
+        gid: "1000"
+        mode: 0400
     volumes:
       - canary_output:/data/output
     networks:
