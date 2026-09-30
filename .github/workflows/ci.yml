@@ -29,3 +29,35 @@ jobs:
             --entrypoint python \
             blue-transcription-mcp:test \
             -m unittest discover -s /tests -v
+
+  publish-candidate:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/feat/batch-zip-transcription-20260925'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build candidate image
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY}:candidate-${GITHUB_SHA}"
+          docker build --pull -t "$IMAGE" .
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Push candidate image
+        run: docker push "$IMAGE"
+
+      - name: Emit immutable candidate reference
+        run: |
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE")"
+          echo "candidate=$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          echo "$DIGEST"
