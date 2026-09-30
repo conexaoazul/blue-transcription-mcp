@@ -2,12 +2,12 @@ import asyncio
 import base64
 import io
 import json
-import sys
 import wave
 import zipfile
+from pathlib import Path
 
-sys.path.insert(0, "/app")
-import server
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 
 
 def build_fixture() -> str:
@@ -25,15 +25,48 @@ def build_fixture() -> str:
     return base64.b64encode(archive.getvalue()).decode()
 
 
+def text_content(result) -> str:
+    return "".join(getattr(part, "text", "") for part in result.content)
+
+
 async def main() -> None:
-    raw = await server.transcribe_zip_base64(
-        "canary-smoke.zip",
-        build_fixture(),
-        format="text",
-        language="pt",
-        concurrency=1,
-    )
-    data = json.loads(raw)
+    token = Path("/run/secrets/transcription_mcp_auth").read_text().strip()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with streamable_http_client(
+        "http://mcp-canary:8083/mcp", headers=headers
+    ) as streams:
+        read, write, *_ = streams
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            tools = await session.list_tools()
+            names = [tool.name for tool in tools.tools]
+            assert "transcribe_zip_base64" in names, names
+
+            rejected = await session.call_tool(
+                "transcribe_zip_base64",
+                arguments={
+                    "filename": "bad.zip",
+                    "data_base64": "%%%",
+                    "format": "text",
+                    "language": "pt",
+                },
+            )
+            assert text_content(rejected).startswith("Rejected:"), rejected
+
+            result = await session.call_tool(
+                "transcribe_zip_base64",
+                arguments={
+                    "filename": "canary-smoke.zip",
+                    "data_base64": build_fixture(),
+                    "format": "text",
+                    "language": "pt",
+                    "concurrency": 1,
+                },
+            )
+            data = json.loads(text_content(result))
+
     assert data["count"] == 1, data
     assert data["ok"] == 1, data
     assert data["failed"] == 0, data
@@ -42,10 +75,14 @@ async def main() -> None:
     assert len(data["members"]) == 1, data
     assert len(data["members"][0]["sha256"]) == 64, data
     assert data["results"][0]["status"] == "ok", data
+
     print(
-        "CANARY_SMOKE_OK "
+        "MCP_CANARY_SMOKE_OK "
         + json.dumps(
             {
+                "tools_count": len(names),
+                "has_zip_base64": True,
+                "invalid_base64_rejected": True,
                 "count": data["count"],
                 "ok": data["ok"],
                 "failed": data["failed"],
