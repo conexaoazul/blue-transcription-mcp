@@ -49,7 +49,7 @@ jobs:
 
       - name: Build candidate image
         run: |
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY}:candidate-${GITHUB_SHA}"
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER}/blue-transcription-mcp-candidate:sha-${GITHUB_SHA}"
           docker build --pull -t "$IMAGE" .
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
