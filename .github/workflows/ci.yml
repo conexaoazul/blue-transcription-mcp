@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "feat/**"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker build --pull -t blue-transcription-mcp:test .
+
+      - name: Compile server
+        run: docker run --rm --entrypoint python blue-transcription-mcp:test -m py_compile /app/server.py
+
+      - name: Run unit tests
+        run: |
+          docker run --rm \
+            -e OUTPUT_DIR=/tmp/out \
+            -v "$PWD/tests:/tests:ro" \
+            --entrypoint python \
+            blue-transcription-mcp:test \
+            -m unittest discover -s /tests -v
