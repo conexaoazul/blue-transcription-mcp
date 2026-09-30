@@ -107,4 +107,4 @@ secrets:
 
 configs:
   canary_smoke_py:
-    file: ./deploy/canary-smoke.py
+    file: ./canary-smoke.py
