@@ -1,6 +1,6 @@
 # Canary runbook — Blue Transcription MCP
 
-Use this only with an immutable GHCR digest produced by CI. The canary is isolated from
+Use this only with an immutable GHCR digest produced by CI from the dedicated candidate package `ghcr.io/conexaoazul/blue-transcription-mcp-candidate`. The canary is isolated from
 the production MCP service: no published port, no production service update, no change
 to the Whisper service, and temporary output only.
 
@@ -15,7 +15,7 @@ to the Whisper service, and temporary output only.
 ## Deploy canary
 
 ```bash
-export CANDIDATE_IMAGE='ghcr.io/conexaoazul/blue-transcription-mcp@sha256:<digest>'
+export CANDIDATE_IMAGE='ghcr.io/conexaoazul/blue-transcription-mcp-candidate@sha256:<digest>'
 docker stack config -c deploy/canary.yml >/tmp/transcription-canary.rendered.yml
 docker stack deploy -c deploy/canary.yml transcription-canary
 docker service ps transcription-canary_mcp-canary --no-trunc
