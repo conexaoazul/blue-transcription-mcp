@@ -10,6 +10,7 @@ import asyncio
 import base64
 import binascii
 import hmac
+import hashlib
 import ipaddress
 import json
 import os
@@ -44,6 +45,9 @@ ALLOWED_INPUT_ROOTS = tuple(
 )
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(500 * 1024 * 1024)))
 MAX_INLINE_BYTES = int(os.environ.get("MAX_INLINE_BYTES", str(25 * 1024 * 1024)))
+MAX_INLINE_ZIP_BYTES = int(
+    os.environ.get("MAX_INLINE_ZIP_BYTES", str(MAX_INLINE_BYTES))
+)
 MAX_BATCH_FILES = max(1, int(os.environ.get("MAX_BATCH_FILES", "100")))
 BATCH_CONCURRENCY = max(1, int(os.environ.get("BATCH_CONCURRENCY", "2")))
 MAX_BATCH_ITEM_BYTES = int(
@@ -183,6 +187,36 @@ def _effective_batch_concurrency(requested: int | None) -> int:
     if requested is None:
         return BATCH_CONCURRENCY
     return max(1, min(int(requested), BATCH_CONCURRENCY))
+
+
+def _decode_base64_limited(data_base64: str, max_bytes: int, label: str) -> bytes:
+    """Strictly decode base64 while rejecting oversized payloads before allocation."""
+    compact = re.sub(r"\\s+", "", data_base64 or "")
+    if not compact:
+        raise ValidationError(f"{label} base64 payload is empty")
+
+    # Base64 expands 3 input bytes to 4 text bytes. Reject clearly oversized
+    # inputs before decoding to avoid allocating attacker-controlled blobs.
+    max_encoded = ((max_bytes + 2) // 3) * 4 + 4
+    if len(compact) > max_encoded:
+        raise ValidationError(f"{label} payload exceeds {max_bytes} decoded bytes")
+
+    try:
+        raw = base64.b64decode(compact, validate=True)
+    except (binascii.Error, ValueError):
+        raise ValidationError(f"invalid {label} base64 payload")
+
+    if len(raw) > max_bytes:
+        raise ValidationError(f"{label} payload exceeds {max_bytes} decoded bytes")
+    return raw
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 # ---------------- whisper.cpp client ----------------------------------------
@@ -404,6 +438,124 @@ async def _run_batch(
     return manifest
 
 
+async def _transcribe_zip_archive(
+    zip_path: Path,
+    archive_label: str,
+    fmt: Format,
+    language: str | None,
+    concurrency: int | None,
+    *,
+    archive_limit: int,
+    archive_kind: str,
+) -> dict:
+    """Apply the same bounded/safe ZIP extraction policy to any trusted local temp path."""
+    if zip_path.suffix.lower() != ".zip" or not zipfile.is_zipfile(zip_path):
+        raise ValidationError("Input is not a valid .zip archive")
+    archive_size = zip_path.stat().st_size
+    if archive_size > archive_limit:
+        raise ValidationError(
+            f"ZIP is {archive_size} bytes; archive limit is {archive_limit}"
+        )
+
+    with tempfile.TemporaryDirectory() as td:
+        work = Path(td)
+        items: list[tuple[Path, str, str, str]] = []
+        members: list[dict] = []
+        extracted_total = 0
+
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                infos = zf.infolist()
+                if len(infos) > MAX_ZIP_ENTRIES:
+                    raise ValidationError(
+                        f"ZIP has {len(infos)} entries; limit is {MAX_ZIP_ENTRIES}"
+                    )
+
+                for info in infos:
+                    if info.is_dir():
+                        continue
+                    mode = (info.external_attr >> 16) & 0o170000
+                    if mode == 0o120000:
+                        raise ValidationError(
+                            f"ZIP symlink entry is not allowed: {info.filename}"
+                        )
+
+                    safe_name = Path(info.filename.replace("\\\\", "/")).name
+                    if not safe_name or not _supported_media_name(safe_name):
+                        continue
+                    if len(items) >= MAX_BATCH_FILES:
+                        raise ValidationError(
+                            f"ZIP contains more than {MAX_BATCH_FILES} supported media files"
+                        )
+                    if info.file_size > MAX_BATCH_ITEM_BYTES:
+                        raise ValidationError(
+                            f"ZIP member {safe_name} is {info.file_size} bytes; "
+                            f"item limit is {MAX_BATCH_ITEM_BYTES}"
+                        )
+
+                    target = work / f"{len(items) + 1:03d}-{safe_name}"
+                    written = 0
+                    digest = hashlib.sha256()
+                    with zf.open(info, "r") as src, target.open("wb") as dst:
+                        while True:
+                            chunk = src.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            extracted_total += len(chunk)
+                            if written > MAX_BATCH_ITEM_BYTES:
+                                raise ValidationError(
+                                    f"ZIP member {safe_name} exceeded item limit while extracting"
+                                )
+                            if extracted_total > MAX_ZIP_EXTRACT_BYTES:
+                                raise ValidationError(
+                                    f"ZIP extraction exceeded {MAX_ZIP_EXTRACT_BYTES} bytes"
+                                )
+                            digest.update(chunk)
+                            dst.write(chunk)
+
+                    members.append(
+                        {
+                            "member": info.filename,
+                            "safe_name": safe_name,
+                            "bytes": written,
+                            "sha256": digest.hexdigest(),
+                        }
+                    )
+                    items.append(
+                        (
+                            target,
+                            f"{archive_label}!{info.filename}",
+                            "zip_member",
+                            Path(safe_name).stem,
+                        )
+                    )
+        except (zipfile.BadZipFile, RuntimeError, OSError) as exc:
+            raise ValidationError(f"unable to read ZIP safely: {exc}") from exc
+
+        if not items:
+            raise ValidationError(
+                "ZIP contains no supported media files. Supported extensions: "
+                + ", ".join(sorted(SUPPORTED_MEDIA_EXTENSIONS))
+            )
+
+        manifest = await _run_batch(items, fmt, language, concurrency)
+        manifest.update(
+            {
+                "archive": archive_label,
+                "archive_kind": archive_kind,
+                "archive_bytes": archive_size,
+                "archive_sha256": _sha256_file(zip_path),
+                "extracted_bytes": extracted_total,
+                "members": members,
+            }
+        )
+        Path(manifest["manifest_path"]).write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False)
+        )
+        return manifest
+
+
 # ---------------- MCP tools -------------------------------------------------
 
 @mcp.tool()
@@ -439,11 +591,9 @@ async def transcribe_base64(
     """
     safe_name = Path(filename).name or "attachment.bin"
     try:
-        raw = base64.b64decode(data_base64, validate=True)
-    except (binascii.Error, ValueError):
-        return "Rejected: invalid base64 payload"
-    if len(raw) > MAX_INLINE_BYTES:
-        return f"Rejected: decoded payload exceeds {MAX_INLINE_BYTES} bytes"
+        raw = _decode_base64_limited(data_base64, MAX_INLINE_BYTES, "inline media")
+    except ValidationError as exc:
+        return f"Rejected: {exc}"
     with tempfile.TemporaryDirectory() as td:
         local = Path(td) / safe_name
         local.write_bytes(raw)
@@ -499,94 +649,58 @@ async def transcribe_zip(
     """Safely extract and transcribe supported media files from a local ZIP."""
     try:
         zip_path = _validate_input_path(path)
-        if zip_path.suffix.lower() != ".zip" or not zipfile.is_zipfile(zip_path):
-            raise ValidationError("Input is not a valid .zip archive")
-        if zip_path.stat().st_size > MAX_BATCH_ITEM_BYTES:
-            raise ValidationError(
-                f"ZIP is {zip_path.stat().st_size} bytes; archive limit is {MAX_BATCH_ITEM_BYTES}"
-            )
+        manifest = await _transcribe_zip_archive(
+            zip_path,
+            str(zip_path),
+            format,
+            language,
+            concurrency,
+            archive_limit=MAX_BATCH_ITEM_BYTES,
+            archive_kind="local_zip",
+        )
+        return json.dumps(manifest, indent=2, ensure_ascii=False)
     except ValidationError as exc:
         return f"Rejected: {exc}"
 
-    with tempfile.TemporaryDirectory() as td:
-        work = Path(td)
-        items: list[tuple[Path, str, str, str]] = []
-        extracted_total = 0
 
-        try:
-            with zipfile.ZipFile(zip_path) as zf:
-                infos = zf.infolist()
-                if len(infos) > MAX_ZIP_ENTRIES:
-                    raise ValidationError(
-                        f"ZIP has {len(infos)} entries; limit is {MAX_ZIP_ENTRIES}"
-                    )
-                for info in infos:
-                    if info.is_dir():
-                        continue
-                    mode = (info.external_attr >> 16) & 0o170000
-                    if mode == 0o120000:
-                        raise ValidationError(
-                            f"ZIP symlink entry is not allowed: {info.filename}"
-                        )
+@mcp.tool()
+async def transcribe_zip_base64(
+    filename: str,
+    data_base64: str,
+    format: Format = "text",
+    language: str | None = None,
+    concurrency: int | None = None,
+) -> str:
+    """Safely transcribe a ZIP supplied inline as base64.
 
-                    safe_name = Path(info.filename.replace("\\", "/")).name
-                    if not safe_name or not _supported_media_name(safe_name):
-                        continue
-                    if len(items) >= MAX_BATCH_FILES:
-                        raise ValidationError(
-                            f"ZIP contains more than {MAX_BATCH_FILES} supported media files"
-                        )
-                    if info.file_size > MAX_BATCH_ITEM_BYTES:
-                        raise ValidationError(
-                            f"ZIP member {safe_name} is {info.file_size} bytes; "
-                            f"item limit is {MAX_BATCH_ITEM_BYTES}"
-                        )
+    This is intended for MCP clients with attachment bytes but no shared filesystem.
+    The archive is decoded into an isolated temporary directory, capped by
+    MAX_INLINE_ZIP_BYTES, and then passes the exact same ZIP entry, symlink,
+    extension, per-member, total-extraction and concurrency gates as transcribe_zip.
+    """
+    safe_name = Path(filename).name or "archive.zip"
+    if Path(safe_name).suffix.lower() != ".zip":
+        return "Rejected: filename must end in .zip"
 
-                    target = work / f"{len(items) + 1:03d}-{safe_name}"
-                    written = 0
-                    with zf.open(info, "r") as src, target.open("wb") as dst:
-                        while True:
-                            chunk = src.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            written += len(chunk)
-                            extracted_total += len(chunk)
-                            if written > MAX_BATCH_ITEM_BYTES:
-                                raise ValidationError(
-                                    f"ZIP member {safe_name} exceeded item limit while extracting"
-                                )
-                            if extracted_total > MAX_ZIP_EXTRACT_BYTES:
-                                raise ValidationError(
-                                    f"ZIP extraction exceeded {MAX_ZIP_EXTRACT_BYTES} bytes"
-                                )
-                            dst.write(chunk)
-
-                    items.append(
-                        (
-                            target,
-                            f"{zip_path}!{info.filename}",
-                            "zip_member",
-                            Path(safe_name).stem,
-                        )
-                    )
-        except (zipfile.BadZipFile, RuntimeError, OSError) as exc:
-            return f"Rejected: unable to read ZIP safely: {exc}"
-        except ValidationError as exc:
-            return f"Rejected: {exc}"
-
-        if not items:
-            return (
-                "Rejected: ZIP contains no supported media files. Supported extensions: "
-                + ", ".join(sorted(SUPPORTED_MEDIA_EXTENSIONS))
-            )
-
-        manifest = await _run_batch(items, format, language, concurrency)
-        manifest["archive"] = str(zip_path)
-        manifest["extracted_bytes"] = extracted_total
-        Path(manifest["manifest_path"]).write_text(
-            json.dumps(manifest, indent=2, ensure_ascii=False)
+    try:
+        raw = _decode_base64_limited(
+            data_base64, MAX_INLINE_ZIP_BYTES, "inline ZIP"
         )
-        return json.dumps(manifest, indent=2, ensure_ascii=False)
+        with tempfile.TemporaryDirectory() as td:
+            zip_path = Path(td) / safe_name
+            zip_path.write_bytes(raw)
+            manifest = await _transcribe_zip_archive(
+                zip_path,
+                safe_name,
+                format,
+                language,
+                concurrency,
+                archive_limit=MAX_INLINE_ZIP_BYTES,
+                archive_kind="inline_base64_zip",
+            )
+            return json.dumps(manifest, indent=2, ensure_ascii=False)
+    except ValidationError as exc:
+        return f"Rejected: {exc}"
 
 
 @mcp.tool()
