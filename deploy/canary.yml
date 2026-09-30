@@ -9,10 +9,10 @@ services:
       PORT: "8083"
       WHISPER_URL: http://transcription_whisper:8082/v1/audio/transcriptions
       MCP_AUTH_TOKEN_FILE: /run/secrets/transcription_mcp_auth
-      MCP_ALLOWED_HOSTS: transcription_mcp_canary:*,127.0.0.1:*,localhost:*
+      MCP_ALLOWED_HOSTS: mcp-canary:*,transcription-canary_mcp-canary:*,127.0.0.1:*,localhost:*
       MCP_ALLOWED_ORIGINS: http://127.0.0.1:*,http://localhost:*
       OUTPUT_DIR: /data/output
-      TMPDIR: /data/output/tmp
+      TMPDIR: /data/output
       MAX_DOWNLOAD_BYTES: "524288000"
       MAX_INLINE_BYTES: "26214400"
       MAX_INLINE_ZIP_BYTES: "26214400"
