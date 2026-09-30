@@ -36,38 +36,39 @@ async def main() -> None:
     http_client = create_mcp_http_client(headers=headers)
     async with http_client:
         async with streamable_http_client(
-            "http://mcp-canary:8083/mcp", http_client=http_client
+            "http://mcp-canary:8083/mcp",
+            http_client=http_client,
         ) as streams:
             read, write, *_ = streams
             async with ClientSession(read, write) as session:
-            await session.initialize()
+                await session.initialize()
 
-            tools = await session.list_tools()
-            names = [tool.name for tool in tools.tools]
-            assert "transcribe_zip_base64" in names, names
+                tools = await session.list_tools()
+                names = [tool.name for tool in tools.tools]
+                assert "transcribe_zip_base64" in names, names
 
-            rejected = await session.call_tool(
-                "transcribe_zip_base64",
-                arguments={
-                    "filename": "bad.zip",
-                    "data_base64": "%%%",
-                    "format": "text",
-                    "language": "pt",
-                },
-            )
-            assert text_content(rejected).startswith("Rejected:"), rejected
+                rejected = await session.call_tool(
+                    "transcribe_zip_base64",
+                    arguments={
+                        "filename": "bad.zip",
+                        "data_base64": "%%%",
+                        "format": "text",
+                        "language": "pt",
+                    },
+                )
+                assert text_content(rejected).startswith("Rejected:"), rejected
 
-            result = await session.call_tool(
-                "transcribe_zip_base64",
-                arguments={
-                    "filename": "canary-smoke.zip",
-                    "data_base64": build_fixture(),
-                    "format": "text",
-                    "language": "pt",
-                    "concurrency": 1,
-                },
-            )
-            data = json.loads(text_content(result))
+                result = await session.call_tool(
+                    "transcribe_zip_base64",
+                    arguments={
+                        "filename": "canary-smoke.zip",
+                        "data_base64": build_fixture(),
+                        "format": "text",
+                        "language": "pt",
+                        "concurrency": 1,
+                    },
+                )
+                data = json.loads(text_content(result))
 
     assert data["count"] == 1, data
     assert data["ok"] == 1, data
