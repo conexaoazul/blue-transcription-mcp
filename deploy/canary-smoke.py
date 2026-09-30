@@ -2,9 +2,11 @@ import asyncio
 import base64
 import io
 import json
+import sys
 import wave
 import zipfile
 
+sys.path.insert(0, "/app")
 import server
 
 
