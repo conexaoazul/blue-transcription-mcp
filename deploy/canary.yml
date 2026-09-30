@@ -53,6 +53,46 @@ services:
         condition: on-failure
         delay: 5s
 
+  smoke:
+    image: ${CANDIDATE_IMAGE:?set CANDIDATE_IMAGE to an immutable GHCR digest}
+    user: "1000:1000"
+    read_only: true
+    entrypoint: ["python", "/canary-smoke.py"]
+    environment:
+      WHISPER_URL: http://transcription_whisper:8082/v1/audio/transcriptions
+      OUTPUT_DIR: /data/output
+      TMPDIR: /data/output
+      MAX_INLINE_ZIP_BYTES: "26214400"
+      MAX_BATCH_FILES: "100"
+      BATCH_CONCURRENCY: "1"
+      MAX_BATCH_ITEM_BYTES: "262144000"
+      MAX_ZIP_EXTRACT_BYTES: "536870912"
+      MAX_ZIP_ENTRIES: "5000"
+    configs:
+      - source: canary_smoke_py
+        target: /canary-smoke.py
+        uid: "1000"
+        gid: "1000"
+        mode: 0444
+    volumes:
+      - canary_output:/data/output
+    networks:
+      - transcribe
+    deploy:
+      replicas: 0
+      placement:
+        constraints:
+          - node.hostname == blueops-oci-worker-1
+      resources:
+        reservations:
+          cpus: "0.05"
+          memory: 64M
+        limits:
+          cpus: "0.25"
+          memory: 256M
+      restart_policy:
+        condition: none
+
 networks:
   transcribe:
     external: true
@@ -64,3 +104,7 @@ volumes:
 secrets:
   transcription_mcp_auth:
     external: true
+
+configs:
+  canary_smoke_py:
+    file: ./deploy/canary-smoke.py
