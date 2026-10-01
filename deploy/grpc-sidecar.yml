@@ -1,0 +1,71 @@
+services:
+  grpc-gateway:
+    image: ${CANDIDATE_IMAGE:?set CANDIDATE_IMAGE to an immutable GHCR digest}
+    user: "1000:1000"
+    read_only: true
+    entrypoint: ["python", "/app/grpc_gateway.py"]
+    environment:
+      WHISPER_URL: http://transcription_whisper:8082/v1/audio/transcriptions
+      MCP_AUTH_TOKEN_FILE: /run/secrets/transcription_mcp_auth
+      GRPC_BIND: 0.0.0.0:50051
+      MAX_GRPC_ZIP_BYTES: "524288000"
+      MAX_GRPC_CHUNK_BYTES: "4194304"
+      MAX_GRPC_RESPONSE_BYTES: "33554432"
+      OUTPUT_DIR: /scratch/output
+      TMPDIR: /scratch
+      MAX_BATCH_FILES: "100"
+      BATCH_CONCURRENCY: "1"
+      MAX_BATCH_ITEM_BYTES: "262144000"
+      MAX_ZIP_EXTRACT_BYTES: "536870912"
+      MAX_ZIP_ENTRIES: "5000"
+    secrets:
+      - source: transcription_mcp_auth
+        target: transcription_mcp_auth
+        uid: "1000"
+        gid: "1000"
+        mode: 0400
+    volumes:
+      - grpc_scratch:/scratch
+    networks:
+      - transcribe
+      - n8n_internal
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.create_connection(('127.0.0.1',50051),3); s.close()",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      # Intentionally disabled by default. Enable only after canary approval.
+      replicas: 0
+      resources:
+        reservations:
+          cpus: "0.05"
+          memory: 96M
+        limits:
+          cpus: "0.50"
+          memory: 768M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+
+networks:
+  transcribe:
+    external: true
+    name: transcription_transcribe
+  n8n_internal:
+    external: true
+    name: n8n_internal
+
+volumes:
+  grpc_scratch:
+
+secrets:
+  transcription_mcp_auth:
+    external: true
