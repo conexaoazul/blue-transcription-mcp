@@ -1,0 +1,40 @@
+http:
+  middlewares:
+    transcription-full-strip:
+      stripPrefix:
+        prefixes: ["/transcribe-full"]
+        forceSlash: true
+    transcription-full-rate:
+      rateLimit:
+        average: 120
+        period: "1m"
+        burst: 40
+    transcription-full-flight:
+      inFlightReq:
+        amount: 8
+    transcription-full-buffer:
+      buffering:
+        maxRequestBodyBytes: 41943040
+        memRequestBodyBytes: 1048576
+  routers:
+    transcription-full:
+      rule: "Host(`mcp-origin.conexaoazul.com`) && PathPrefix(`/transcribe-full`)"
+      entryPoints: [websecure]
+      priority: 236
+      middlewares:
+        - transcription-full-strip
+        - transcription-full-rate
+        - transcription-full-flight
+        - transcription-full-buffer
+      service: transcription-full-svc
+      tls:
+        certresolver: myresolver
+  services:
+    transcription-full-svc:
+      loadBalancer:
+        servers:
+          - url: "http://10.77.0.1:18086"
+        healthCheck:
+          path: "/healthz"
+          interval: "15s"
+          timeout: "5s"
