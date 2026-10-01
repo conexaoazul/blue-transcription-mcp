@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package blue.transcription.v1;
+
+import "google/protobuf/wrappers.proto";
+
+// Metadata contract for TranscribeZip:
+//   authorization: Bearer <token>       (required)
+//   x-filename: archive.zip             (optional, default archive.zip)
+//   x-format: text|json|srt|vtt|md      (optional, default text)
+//   x-language: pt                      (optional)
+//   x-concurrency: 1                    (optional)
+//   x-correlation-id: caller-id         (optional)
+//
+// The request stream is binary ZIP data split into BytesValue messages.
+// The response is a StringValue containing the existing JSON batch manifest.
+service TranscriptionGateway {
+  rpc TranscribeZip(stream google.protobuf.BytesValue)
+      returns (google.protobuf.StringValue);
+}
