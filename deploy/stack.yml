@@ -96,6 +96,52 @@ services:
         parallelism: 1
         order: stop-first
         failure_action: rollback
+
+  ui:
+    image: ghcr.io/conexaoazul/blue-transcription-ui:${UI_IMAGE_TAG:?set UI_IMAGE_TAG}
+    user: "1000:1000"
+    read_only: true
+    environment:
+      WHISPER_API_URL: http://whisper:8082/v1/audio/transcriptions
+      WHISPER_API_KEY: not-needed
+      WHISPER_MODEL: whisper-1
+      MAX_UPLOAD_MB: "250"
+      REQUEST_TIMEOUT: "1200"
+      WHISPER_RTF_ESTIMATE: "0.8"
+      OUTPUT_DIR: /data/outputs
+      TMPDIR: /data/outputs
+      ALLOWED_ORIGINS: "*"
+      OLLAMA_URL: http://127.0.0.1:9
+    volumes:
+      - ui_output:/data/outputs
+    networks:
+      - transcribe
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=5)); raise SystemExit(0 if d.get('status') == 'ok' and d.get('upstream') == 'ok' else 1)"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == blueops-oci-worker-2
+      resources:
+        reservations:
+          cpus: "0.10"
+          memory: 128M
+        limits:
+          cpus: "1.00"
+          memory: 768M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      update_config:
+        parallelism: 1
+        order: start-first
+        failure_action: rollback
+
 networks:
   transcribe:
     driver: overlay
@@ -104,6 +150,7 @@ volumes:
   whisper_models:
   transcription_inbox:
   transcription_output:
+  ui_output:
 
 secrets:
   transcription_mcp_auth:

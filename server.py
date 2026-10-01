@@ -49,7 +49,7 @@ MAX_INLINE_ZIP_BYTES = int(
     os.environ.get("MAX_INLINE_ZIP_BYTES", str(MAX_INLINE_BYTES))
 )
 MAX_BATCH_FILES = max(1, int(os.environ.get("MAX_BATCH_FILES", "100")))
-BATCH_CONCURRENCY = max(1, int(os.environ.get("BATCH_CONCURRENCY", "2")))
+BATCH_CONCURRENCY = max(1, int(os.environ.get("BATCH_CONCURRENCY", "1")))
 MAX_BATCH_ITEM_BYTES = int(
     os.environ.get("MAX_BATCH_ITEM_BYTES", str(250 * 1024 * 1024))
 )
