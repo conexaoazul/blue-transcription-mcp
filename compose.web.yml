@@ -1,0 +1,52 @@
+services:
+  public:
+    image: ghcr.io/conexaoazul/blue-transcription-mcp-candidate@sha256:f821d20d24d014953d74132387542d755d94f1217ed090563a8696bc88b41f32
+    container_name: blue-transcription-mcp-public
+    restart: unless-stopped
+    read_only: true
+    entrypoint: ["python", "/app/public_server.py"]
+    environment:
+      WHISPER_URL: http://whisper-local:8082/v1/audio/transcriptions
+      OUTPUT_DIR: /data/output
+      TMPDIR: /data/output
+      PORT: "8084"
+      PUBLIC_CONCURRENCY: "1"
+      PUBLIC_MAX_INLINE_BYTES: "26214400"
+      PUBLIC_MAX_INLINE_ZIP_BYTES: "26214400"
+    volumes:
+      - /opt/blue-transcription-mcp/public_server.py:/app/public_server.py:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=67108864,mode=1777
+      - /data/output:rw,noexec,nosuid,size=536870912,mode=1777
+    ports:
+      - "10.77.0.1:18084:8084"
+    networks:
+      - transcription
+
+  portal-full:
+    image: ghcr.io/conexaoazul/blue-transcription-mcp-candidate@sha256:f821d20d24d014953d74132387542d755d94f1217ed090563a8696bc88b41f32
+    container_name: blue-transcription-mcp-portal-full
+    restart: unless-stopped
+    read_only: true
+    entrypoint: ["python", "/app/full_portal_server.py"]
+    environment:
+      WHISPER_URL: http://whisper-local:8082/v1/audio/transcriptions
+      OUTPUT_DIR: /data/output
+      TMPDIR: /data/output
+      PORT: "8086"
+      MCP_ALLOWED_HOSTS: "mcp-origin.conexaoazul.com,mcp-origin.conexaoazul.com:*,127.0.0.1:*,localhost:*"
+      MCP_ALLOWED_ORIGINS: "https://mcp-origin.conexaoazul.com,http://127.0.0.1:*,http://localhost:*"
+    volumes:
+      - /opt/blue-transcription-mcp/full_portal_server.py:/app/full_portal_server.py:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=67108864,mode=1777
+      - /data/output:rw,noexec,nosuid,size=536870912,mode=1777
+    ports:
+      - "10.77.0.1:18086:8086"
+    networks:
+      - transcription
+
+networks:
+  transcription:
+    external: true
+    name: blue-transcription-chatgpt-local
