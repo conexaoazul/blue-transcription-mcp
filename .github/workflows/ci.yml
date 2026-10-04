@@ -43,7 +43,7 @@ jobs:
             /tests/http_metering_smoke.py
 
   publish-candidate:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/feat/batch-zip-transcription-20260925'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/feat/metering-candidate-publish-20261004'
     needs: test
     runs-on: ubuntu-latest
     permissions:
