@@ -738,18 +738,16 @@ async def transcribe_batch(
     format: Format = "text",
     language: str | None = None,
     concurrency: int | None = None,
+    request_id: str | None = None,
 ) -> str:
-    """Transcribe multiple local audio/video files with bounded concurrency.
-
-    Every path must pass the same allowed-root validation as transcribe_file.
-    Unsupported extensions and oversized files are rejected before inference.
-    """
+    """Transcribe multiple local audio/video files with bounded concurrency."""
     if not paths:
         return "Rejected: paths must contain at least one file"
     if len(paths) > MAX_BATCH_FILES:
         return f"Rejected: batch has {len(paths)} files; limit is {MAX_BATCH_FILES}"
 
     items: list[tuple[Path, str, str, str]] = []
+    reservation = None
     try:
         for raw_path in paths:
             p = _validate_input_path(raw_path)
@@ -761,11 +759,26 @@ async def transcribe_batch(
                     f"File {p.name} is {size} bytes; item limit is {MAX_BATCH_ITEM_BYTES}"
                 )
             items.append((p, str(p), "batch_file", p.stem))
-    except ValidationError as exc:
-        return f"Rejected: {exc}"
 
-    manifest = await _run_batch(items, format, language, concurrency)
-    return json.dumps(manifest, indent=2, ensure_ascii=False)
+        reservation, metered_seconds = await _reserve_metered_usage(
+            tool="transcribe_batch",
+            source="|".join(str(item[0]) for item in items),
+            paths=[item[0] for item in items],
+            request_id=request_id,
+        )
+        manifest = await _run_batch(items, format, language, concurrency)
+        _complete_metered_usage(reservation, metered_seconds)
+        if reservation is not None:
+            manifest["usage_seconds"] = round(metered_seconds, 3)
+            if METERING_STORE is not None and reservation.tenant_id:
+                manifest["usage"] = METERING_STORE.usage_summary(reservation.tenant_id)
+        return json.dumps(manifest, indent=2, ensure_ascii=False)
+    except ValidationError as exc:
+        _fail_metered_usage(reservation)
+        return f"Rejected: {exc}"
+    except Exception:
+        _fail_metered_usage(reservation)
+        raise
 
 
 @mcp.tool()
@@ -774,6 +787,7 @@ async def transcribe_zip(
     format: Format = "text",
     language: str | None = None,
     concurrency: int | None = None,
+    request_id: str | None = None,
 ) -> str:
     """Safely extract and transcribe supported media files from a local ZIP."""
     try:
@@ -786,6 +800,8 @@ async def transcribe_zip(
             concurrency,
             archive_limit=MAX_BATCH_ITEM_BYTES,
             archive_kind="local_zip",
+            metering_tool="transcribe_zip",
+            request_id=request_id,
         )
         return json.dumps(manifest, indent=2, ensure_ascii=False)
     except ValidationError as exc:
@@ -799,6 +815,7 @@ async def transcribe_zip_base64(
     format: Format = "text",
     language: str | None = None,
     concurrency: int | None = None,
+    request_id: str | None = None,
 ) -> str:
     """Safely transcribe a ZIP supplied inline as base64.
 
@@ -826,6 +843,8 @@ async def transcribe_zip_base64(
                 concurrency,
                 archive_limit=MAX_INLINE_ZIP_BYTES,
                 archive_kind="inline_base64_zip",
+                metering_tool="transcribe_zip_base64",
+                request_id=request_id,
             )
             return json.dumps(manifest, indent=2, ensure_ascii=False)
     except ValidationError as exc:
