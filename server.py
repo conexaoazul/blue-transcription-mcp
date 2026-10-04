@@ -997,7 +997,6 @@ if __name__ == "__main__":
     transport = os.environ.get("TRANSPORT", "stdio").lower()
     if transport in ("http", "streamable-http"):
         import uvicorn
-        from starlette.middleware.base import BaseHTTPMiddleware
         from starlette.responses import JSONResponse
 
         token = os.environ.get("MCP_AUTH_TOKEN", "").strip()
@@ -1017,15 +1016,55 @@ if __name__ == "__main__":
             sys.exit(1)
         expected = f"Bearer {token}".encode()
 
-        class BearerAuth(BaseHTTPMiddleware):
-            async def dispatch(self, request, call_next):
-                if request.url.path == "/healthz":
-                    return await call_next(request)
-                hdr = request.headers.get("authorization", "").encode()
-                # Constant-time compare to avoid token-length timing oracles.
-                if not hmac.compare_digest(hdr, expected):
-                    return JSONResponse({"error": "unauthorized"}, status_code=401)
-                return await call_next(request)
+        class TenantBearerAuth:
+            """Pure ASGI auth middleware so ContextVar reaches MCP tool execution."""
+
+            def __init__(self, inner):
+                self.inner = inner
+
+            async def __call__(self, scope, receive, send):
+                if scope.get("type") != "http":
+                    return await self.inner(scope, receive, send)
+
+                path = scope.get("path", "")
+                if path == "/healthz":
+                    return await self.inner(scope, receive, send)
+
+                headers = {
+                    key.decode("latin-1").lower(): value.decode("latin-1")
+                    for key, value in scope.get("headers", [])
+                }
+                auth = headers.get("authorization", "")
+                auth_bytes = auth.encode()
+
+                # Operator/master token preserves existing behavior and bypasses
+                # tenant metering. It is never interpreted as a tenant API key.
+                if hmac.compare_digest(auth_bytes, expected):
+                    ctx_token = CURRENT_TENANT.set(None)
+                    try:
+                        return await self.inner(scope, receive, send)
+                    finally:
+                        CURRENT_TENANT.reset(ctx_token)
+
+                if METERING_STORE is None or not auth.startswith("Bearer "):
+                    response = JSONResponse({"error": "unauthorized"}, status_code=401)
+                    return await response(scope, receive, send)
+
+                api_key = auth[7:].strip()
+                try:
+                    tenant = METERING_STORE.get_tenant_by_api_key(api_key)
+                except TrialExpired:
+                    response = JSONResponse({"error": "access_expired"}, status_code=403)
+                    return await response(scope, receive, send)
+                except TenantUnauthorized:
+                    response = JSONResponse({"error": "unauthorized"}, status_code=401)
+                    return await response(scope, receive, send)
+
+                ctx_token = CURRENT_TENANT.set(tenant)
+                try:
+                    return await self.inner(scope, receive, send)
+                finally:
+                    CURRENT_TENANT.reset(ctx_token)
 
         # Ensure output dir exists eagerly in HTTP mode so we don't surprise
         # callers with mkdir failures later.
@@ -1037,12 +1076,25 @@ if __name__ == "__main__":
             output_writable = OUTPUT_DIR.exists() and os.access(OUTPUT_DIR, os.W_OK)
             status = "ok" if output_writable else "degraded"
             return JSONResponse(
-                {"status": status, "output_writable": output_writable},
+                {
+                    "status": status,
+                    "output_writable": output_writable,
+                    "metering_enabled": METERING_STORE is not None,
+                },
                 status_code=200 if output_writable else 503,
             )
 
+        async def usage(_request):
+            tenant = CURRENT_TENANT.get()
+            if tenant is None or METERING_STORE is None:
+                return JSONResponse(
+                    {"error": "tenant_context_required"}, status_code=400
+                )
+            return JSONResponse(METERING_STORE.usage_summary(tenant.id))
+
         app.add_route("/healthz", healthz, methods=["GET"])
-        app.add_middleware(BearerAuth)
+        app.add_route("/usage", usage, methods=["GET"])
+        app = TenantBearerAuth(app)
         host = os.environ.get("HOST", "0.0.0.0")
         port = int(os.environ.get("PORT", "8083"))
         uvicorn.run(app, host=host, port=port)
