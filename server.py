@@ -29,6 +29,17 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from metering import (
+    CURRENT_TENANT,
+    ConcurrencyExceeded,
+    MeteringError,
+    QuotaExceeded,
+    RequestIdRequired,
+    TrialExpired,
+    TenantUnauthorized,
+    store_from_env,
+)
+
 WHISPER_URL = os.environ.get(
     "WHISPER_URL", "http://host.docker.internal:8082/v1/audio/transcriptions"
 )
@@ -83,6 +94,7 @@ MCP_ALLOWED_ORIGINS = [
 
 Format = Literal["text", "json", "srt", "vtt", "md"]
 WHISPER_FORMAT = {"text": "json", "json": "verbose_json", "srt": "srt", "vtt": "vtt", "md": "verbose_json"}
+METERING_STORE = store_from_env()
 
 mcp = FastMCP(
     "whisper-transcribe",
@@ -217,6 +229,71 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+async def _probe_duration_seconds(path: Path) -> float:
+    """Return media duration using ffprobe; metered tenants fail closed on unknown duration."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise ValidationError(
+            f"Unable to determine media duration for quota metering: "
+            f"{stderr.decode(errors='replace')[-200:]}"
+        )
+    try:
+        duration = float(stdout.decode().strip())
+    except ValueError as exc:
+        raise ValidationError("Unable to determine media duration for quota metering") from exc
+    if duration <= 0:
+        raise ValidationError("Media duration must be greater than zero")
+    return duration
+
+
+async def _reserve_metered_usage(
+    *,
+    tool: str,
+    source: str,
+    paths: list[Path],
+    request_id: str | None,
+):
+    """Reserve tenant quota before inference. Master-token calls are not metered."""
+    tenant = CURRENT_TENANT.get()
+    if tenant is None or METERING_STORE is None:
+        return None, 0.0
+
+    total_seconds = 0.0
+    for path in paths:
+        total_seconds += await _probe_duration_seconds(path)
+
+    try:
+        reservation = METERING_STORE.reserve(
+            tenant,
+            tool=tool,
+            source=source,
+            seconds=total_seconds,
+            request_id=request_id,
+        )
+    except (RequestIdRequired, TrialExpired, QuotaExceeded, ConcurrencyExceeded, MeteringError) as exc:
+        raise ValidationError(f"metering: {exc}") from exc
+    return reservation, total_seconds
+
+
+def _complete_metered_usage(reservation, seconds: float) -> None:
+    if reservation is not None and METERING_STORE is not None:
+        METERING_STORE.complete(reservation, seconds)
+
+
+def _fail_metered_usage(reservation) -> None:
+    if reservation is not None and METERING_STORE is not None:
+        METERING_STORE.fail(reservation)
 
 
 # ---------------- whisper.cpp client ----------------------------------------
