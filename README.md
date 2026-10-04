@@ -19,7 +19,7 @@ A Conexão Azul oferece também operação gerenciada:
 - **Trial Cloud** — teste assistido de 7 dias ou até 120 minutos.
 - **Cloud** — endpoint MCP gerenciado, healthcheck, atualização e monitoramento básico.
 - **Pro** — limites maiores, mais concorrência, integração assistida com n8n/webhook e suporte prioritário.
-- **Dedicated / On-Prem** — runtime isolado ou instalado na infraestrutura do cliente, com política de rede, hardening, capacidade e suporte acordados.
+- **Private / On-Prem** — runtime isolado ou instalado na infraestrutura do cliente, com política de rede, hardening, capacidade e suporte acordados.
 
 Planos e ativação: https://www.conexaoazul.com/blue-transcription-mcp#planos
 
@@ -60,14 +60,14 @@ auth, SSRF guards, and a Docker MCP Toolkit catalog entry.
 
 | Tool | Source | Notes |
 |---|---|---|
-| `transcribe_file(path, format, language?)` | Local audio/video file | Path must resolve under `ALLOWED_INPUT_ROOTS` |
-| `transcribe_base64(filename, data_base64, format, language?)` | Inline attachment bytes | Capped by `MAX_INLINE_BYTES` |
-| `transcribe_batch(paths, format, language?, concurrency?)` | Multiple local files | Bounded count/size/concurrency |
-| `transcribe_zip(path, format, language?, concurrency?)` | Local ZIP containing media | Safe basename extraction; symlink/zip-bomb guards |
-| `transcribe_zip_base64(filename, data_base64, format, language?, concurrency?)` | Inline ZIP attachment bytes | Same ZIP safety gates; pre-decode size cap; archive/member SHA-256 manifest |
-| `transcribe_url(url, format, language?)` | Direct http(s) URL | Public hosts only |
-| `transcribe_youtube(url, format, language?)` | YouTube (yt-dlp) | URL validated *before* yt-dlp runs |
-| `transcribe_podcast(rss_url, episode_index, format, language?)` | RSS feed episode | Audio enclosure preferred; video fallback |
+| `transcribe_file(path, format, language?, request_id?)` | Local audio/video file | Path must resolve under `ALLOWED_INPUT_ROOTS` |
+| `transcribe_base64(filename, data_base64, format, language?, request_id?)` | Inline attachment bytes | Capped by `MAX_INLINE_BYTES` |
+| `transcribe_batch(paths, format, language?, concurrency?, request_id?)` | Multiple local files | Bounded count/size/concurrency |
+| `transcribe_zip(path, format, language?, concurrency?, request_id?)` | Local ZIP containing media | Safe basename extraction; symlink/zip-bomb guards |
+| `transcribe_zip_base64(filename, data_base64, format, language?, concurrency?, request_id?)` | Inline ZIP attachment bytes | Same ZIP safety gates; pre-decode size cap; archive/member SHA-256 manifest |
+| `transcribe_url(url, format, language?, request_id?)` | Direct http(s) URL | Public hosts only |
+| `transcribe_youtube(url, format, language?, request_id?)` | YouTube (yt-dlp) | URL validated *before* yt-dlp runs |
+| `transcribe_podcast(rss_url, episode_index, format, language?, request_id?)` | RSS feed episode | Audio enclosure preferred; video fallback |
 
 **Formats:** `text` · `json` · `srt` · `vtt` · `md`. The `md`/`srt`/`vtt` formats
 write a file to `OUTPUT_DIR` and return its path; `text`/`json` return inline.
@@ -131,6 +131,10 @@ All knobs are environment variables (see `.env.example`):
 | `MAX_BATCH_ITEM_BYTES` | `262144000` (250MB) | Per-item limit for batch/ZIP |
 | `MAX_ZIP_EXTRACT_BYTES` | `1073741824` (1GiB) | Aggregate uncompressed ZIP cap |
 | `MAX_ZIP_ENTRIES` | `5000` | Maximum central-directory entries accepted in a ZIP |
+| `METERING_ENABLED` | `0` | Enable tenant API keys, quotas and usage accounting |
+| `METERING_DB` | `/data/metering/metering.sqlite3` | SQLite usage ledger path |
+| `METERING_REQUIRE_REQUEST_ID` | `1` | Require stable request IDs for idempotent tenant charging |
+| `METERING_LEASE_SECONDS` | `1800` | Timeout for in-flight usage reservations |
 
 ## Wiring into MCP clients
 
