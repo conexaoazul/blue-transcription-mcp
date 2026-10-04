@@ -6,6 +6,21 @@ Produto/serviço Conexão Azul: https://www.conexaoazul.com/blue-transcription-m
 
 Este repositório é um fork operacional de `MarcusTseng/mcp-whisper` mantido pela Conexão Azul. Além do fluxo original de transcrição, a variante Conexão Azul adiciona ingestão segura de ZIP, batch, inline Base64, manifestos com hash e perfil de deploy para infraestrutura privada.
 
+## Community, Cloud e On-Prem
+
+O core deste repositório é a edição **Community/self-host**: você pode operar o software na sua própria infraestrutura e o volume fica limitado pelo hardware que você provisionar.
+
+A Conexão Azul oferece também operação gerenciada:
+
+- **Trial Cloud** — teste assistido de 7 dias ou até 120 minutos.
+- **Cloud** — endpoint MCP gerenciado, healthcheck, atualização e monitoramento básico.
+- **Pro** — limites maiores, mais concorrência, integração assistida com n8n/webhook e suporte prioritário.
+- **Dedicated / On-Prem** — runtime isolado ou instalado na infraestrutura do cliente, com política de rede, hardening, capacidade e suporte acordados.
+
+Planos e ativação: https://www.conexaoazul.com/blue-transcription-mcp#planos
+
+A edição Community não tem SLA ou suporte gerenciado incluído. Os planos pagos remuneram operação, integração, capacidade, isolamento, suporte e governança — não o acesso ao código MIT.
+
 ## O que a variante Conexão Azul adiciona
 
 - `transcribe_base64` para mídia recebida por clientes MCP sem filesystem compartilhado.
