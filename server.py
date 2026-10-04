@@ -852,36 +852,68 @@ async def transcribe_zip_base64(
 
 
 @mcp.tool()
-async def transcribe_url(url: str, format: Format = "text", language: str | None = None) -> str:
-    """Transcribe audio from an http(s) URL (direct link to mp3/wav/m4a/etc).
-
-    Only public http(s) URLs are accepted; private/loopback/link-local hosts
-    are rejected. The download is capped at MAX_DOWNLOAD_BYTES (default 500MB).
-    """
+async def transcribe_url(
+    url: str,
+    format: Format = "text",
+    language: str | None = None,
+    request_id: str | None = None,
+) -> str:
+    """Transcribe audio from a public http(s) URL with optional tenant metering."""
+    reservation = None
     try:
         with tempfile.TemporaryDirectory() as td:
             local = await _download(url, Path(td))
+            reservation, metered_seconds = await _reserve_metered_usage(
+                tool="transcribe_url",
+                source=url,
+                paths=[local],
+                request_id=request_id,
+            )
             title = Path(urlparse(url).path).stem or "url-audio"
             response = await _post_to_whisper(local, format, language)
-            return _format_result(response, format, title=title, source=url, source_kind="url")
+            result = _format_result(
+                response, format, title=title, source=url, source_kind="url"
+            )
+            _complete_metered_usage(reservation, metered_seconds)
+            return result
     except ValidationError as e:
+        _fail_metered_usage(reservation)
         return f"Rejected: {e}"
+    except Exception:
+        _fail_metered_usage(reservation)
+        raise
 
 
 @mcp.tool()
-async def transcribe_youtube(url: str, format: Format = "text", language: str | None = None) -> str:
-    """Transcribe a YouTube (or yt-dlp-supported) video via audio extraction.
-
-    URL is validated (http/https + public host) before yt-dlp sees it,
-    closing yt-dlp's file:// and internal-host vectors.
-    """
+async def transcribe_youtube(
+    url: str,
+    format: Format = "text",
+    language: str | None = None,
+    request_id: str | None = None,
+) -> str:
+    """Transcribe a yt-dlp-supported URL with optional tenant metering."""
+    reservation = None
     try:
         with tempfile.TemporaryDirectory() as td:
             audio, title = await _ytdlp_extract(url, Path(td))
+            reservation, metered_seconds = await _reserve_metered_usage(
+                tool="transcribe_youtube",
+                source=url,
+                paths=[audio],
+                request_id=request_id,
+            )
             response = await _post_to_whisper(audio, format, language)
-            return _format_result(response, format, title=title, source=url, source_kind="youtube")
+            result = _format_result(
+                response, format, title=title, source=url, source_kind="youtube"
+            )
+            _complete_metered_usage(reservation, metered_seconds)
+            return result
     except ValidationError as e:
+        _fail_metered_usage(reservation)
         return f"Rejected: {e}"
+    except Exception:
+        _fail_metered_usage(reservation)
+        raise
 
 
 @mcp.tool()
@@ -890,6 +922,7 @@ async def transcribe_podcast(
     episode_index: int = 0,
     format: Format = "md",
     language: str | None = None,
+    request_id: str | None = None,
 ) -> str:
     """Transcribe a podcast episode from an RSS feed.
 
@@ -930,15 +963,32 @@ async def transcribe_podcast(
     podcast_title = feed.feed.get("title", "Podcast")
     full_title = f"{podcast_title} - {title}"
 
+    reservation = None
     try:
         with tempfile.TemporaryDirectory() as td:
             local = await _download(chosen_url, Path(td))
-            response = await _post_to_whisper(local, format, language)
-            return _format_result(
-                response, format, title=full_title, source=chosen_url, source_kind="podcast"
+            reservation, metered_seconds = await _reserve_metered_usage(
+                tool="transcribe_podcast",
+                source=chosen_url,
+                paths=[local],
+                request_id=request_id,
             )
+            response = await _post_to_whisper(local, format, language)
+            result = _format_result(
+                response,
+                format,
+                title=full_title,
+                source=chosen_url,
+                source_kind="podcast",
+            )
+            _complete_metered_usage(reservation, metered_seconds)
+            return result
     except ValidationError as e:
+        _fail_metered_usage(reservation)
         return f"Rejected: {e}"
+    except Exception:
+        _fail_metered_usage(reservation)
+        raise
 
 
 # ---------------- entrypoint ------------------------------------------------
