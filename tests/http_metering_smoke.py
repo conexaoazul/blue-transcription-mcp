@@ -1,13 +1,56 @@
+import base64
+import io
 import json
+import math
 import os
+import struct
 import subprocess
 import sys
+import threading
 import time
+import wave
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 
 
+class FakeWhisperHandler(BaseHTTPRequestHandler):
+    def log_message(self, _format, *_args):
+        return
+
+    def do_POST(self):
+        length = int(self.headers.get("content-length", "0"))
+        if length:
+            self.rfile.read(length)
+        body = b'{"text":"ok"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _wav_base64(seconds: float = 1.0) -> str:
+    frames = int(16000 * seconds)
+    bio = io.BytesIO()
+    with wave.open(bio, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(
+            b"".join(
+                struct.pack("<h", int(5000 * math.sin(2 * math.pi * 440 * i / 16000)))
+                for i in range(frames)
+            )
+        )
+    return base64.b64encode(bio.getvalue()).decode()
+
+
 def main() -> None:
+    fake_whisper = ThreadingHTTPServer(("127.0.0.1", 18082), FakeWhisperHandler)
+    whisper_thread = threading.Thread(target=fake_whisper.serve_forever, daemon=True)
+    whisper_thread.start()
+
     env = os.environ.copy()
     env.update(
         {
@@ -19,6 +62,7 @@ def main() -> None:
             "TRANSPORT": "http",
             "HOST": "127.0.0.1",
             "PORT": "8083",
+            "WHISPER_URL": "http://127.0.0.1:18082/v1/audio/transcriptions",
         }
     )
     os.makedirs(env["OUTPUT_DIR"], exist_ok=True)
@@ -121,7 +165,44 @@ def main() -> None:
         assert r.status_code == 200, r.text
         assert "transcribe_zip_base64" in r.text, r.text
         assert "request_id" in r.text, r.text
+
+        payload = _wav_base64(1.0)
+        tool_call = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "transcribe_base64",
+                "arguments": {
+                    "filename": "smoke.wav",
+                    "data_base64": payload,
+                    "format": "text",
+                    "language": "pt",
+                    "request_id": "ci-stable-request-1",
+                },
+            },
+        }
+        r = httpx.post(base + "/mcp", headers=mcp_headers, json=tool_call, timeout=15)
+        assert r.status_code == 200, r.text
+        assert "ok" in r.text, r.text
+
+        r = httpx.get(base + "/usage", headers=headers, timeout=3)
+        first_usage = r.json()
+        assert 0.9 <= first_usage["used_seconds"] <= 1.1, first_usage
+        assert first_usage["completed_calls"] == 1, first_usage
+
+        replay = dict(tool_call)
+        replay["id"] = 4
+        r = httpx.post(base + "/mcp", headers=mcp_headers, json=replay, timeout=15)
+        assert r.status_code == 200, r.text
+
+        r = httpx.get(base + "/usage", headers=headers, timeout=3)
+        replay_usage = r.json()
+        assert replay_usage["completed_calls"] == 1, replay_usage
+        assert abs(replay_usage["used_seconds"] - first_usage["used_seconds"]) < 0.001, replay_usage
     finally:
+        fake_whisper.shutdown()
+        fake_whisper.server_close()
         server.terminate()
         try:
             server.wait(timeout=5)
