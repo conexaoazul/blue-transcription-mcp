@@ -1,8 +1,12 @@
-# Blue Transcription MCP
+# Blue Transcription
 
-**Áudio, vídeo e ZIPs em lote para ChatGPT, agentes de IA, n8n e integrações — com processamento local-first via whisper.cpp.**
+**Voice-to-Workflow Infrastructure — transforme áudio, vídeo e ZIP em contexto para ChatGPT, agentes, n8n, CRM e automações.**
+
+**MCP-ready · Cloud gerenciada · Self-host · On-Prem**
 
 Produto/serviço Conexão Azul: https://www.conexaoazul.com/blue-transcription-mcp
+
+> O nome do repositório continua `blue-transcription-mcp` por compatibilidade técnica. Comercialmente, o produto é **Blue Transcription** e “MCP-ready” é um selo de integração, não a promessa principal.
 
 Este repositório é um fork operacional de `MarcusTseng/mcp-whisper` mantido pela Conexão Azul. Além do fluxo original de transcrição, a variante Conexão Azul adiciona ingestão segura de ZIP, batch, inline Base64, manifestos com hash e perfil de deploy para infraestrutura privada.
 
