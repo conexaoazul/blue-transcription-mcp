@@ -524,6 +524,8 @@ async def _transcribe_zip_archive(
     *,
     archive_limit: int,
     archive_kind: str,
+    metering_tool: str | None = None,
+    request_id: str | None = None,
 ) -> dict:
     """Apply the same bounded/safe ZIP extraction policy to any trusted local temp path."""
     if zip_path.suffix.lower() != ".zip" or not zipfile.is_zipfile(zip_path):
@@ -616,7 +618,26 @@ async def _transcribe_zip_archive(
                 + ", ".join(sorted(SUPPORTED_MEDIA_EXTENSIONS))
             )
 
-        manifest = await _run_batch(items, fmt, language, concurrency)
+        reservation = None
+        metered_seconds = 0.0
+        try:
+            reservation, metered_seconds = await _reserve_metered_usage(
+                tool=metering_tool or archive_kind,
+                source=archive_label,
+                paths=[item[0] for item in items],
+                request_id=request_id,
+            )
+            manifest = await _run_batch(items, fmt, language, concurrency)
+            _complete_metered_usage(reservation, metered_seconds)
+        except Exception:
+            _fail_metered_usage(reservation)
+            raise
+
+        if reservation is not None:
+            manifest["usage_seconds"] = round(metered_seconds, 3)
+            if METERING_STORE is not None and reservation.tenant_id:
+                manifest["usage"] = METERING_STORE.usage_summary(reservation.tenant_id)
+
         manifest.update(
             {
                 "archive": archive_label,
@@ -636,48 +657,79 @@ async def _transcribe_zip_archive(
 # ---------------- MCP tools -------------------------------------------------
 
 @mcp.tool()
-async def transcribe_file(path: str, format: Format = "text", language: str | None = None) -> str:
+async def transcribe_file(
+    path: str,
+    format: Format = "text",
+    language: str | None = None,
+    request_id: str | None = None,
+) -> str:
     """Transcribe a local audio/video file.
 
-    The path must resolve inside one of the allowed input roots
-    (configured via ALLOWED_INPUT_ROOTS — defaults: ~/Downloads, ~/Music,
-    ~/whisper.cpp/samples). Symlink escapes and ../ traversal are rejected.
-
-    Args:
-        path: Absolute path to the audio or video file.
-        format: text | json | srt | vtt | md.
-        language: ISO 639-1 code, omit for auto-detect.
+    For metered tenants, request_id must be stable across retries so usage is
+    idempotent. Master-token/operator calls remain unmetered.
     """
+    reservation = None
     try:
         p = _validate_input_path(path)
+        reservation, metered_seconds = await _reserve_metered_usage(
+            tool="transcribe_file",
+            source=str(p),
+            paths=[p],
+            request_id=request_id,
+        )
+        title = p.stem
+        response = await _post_to_whisper(p, format, language)
+        result = _format_result(
+            response, format, title=title, source=str(p), source_kind="file"
+        )
+        _complete_metered_usage(reservation, metered_seconds)
+        return result
     except ValidationError as e:
+        _fail_metered_usage(reservation)
         return f"Rejected: {e}"
-    title = p.stem
-    response = await _post_to_whisper(p, format, language)
-    return _format_result(response, format, title=title, source=str(p), source_kind="file")
+    except Exception:
+        _fail_metered_usage(reservation)
+        raise
 
 
 @mcp.tool()
 async def transcribe_base64(
-    filename: str, data_base64: str, format: Format = "text", language: str | None = None
+    filename: str,
+    data_base64: str,
+    format: Format = "text",
+    language: str | None = None,
+    request_id: str | None = None,
 ) -> str:
-    """Transcribe inline base64 audio/video data.
-
-    Intended for MCP clients that have attachment bytes but no shared filesystem or public URL.
-    The decoded payload is capped by MAX_INLINE_BYTES (25 MiB by default).
-    """
+    """Transcribe inline base64 audio/video data with optional tenant metering."""
     safe_name = Path(filename).name or "attachment.bin"
+    reservation = None
     try:
         raw = _decode_base64_limited(data_base64, MAX_INLINE_BYTES, "inline media")
+        with tempfile.TemporaryDirectory() as td:
+            local = Path(td) / safe_name
+            local.write_bytes(raw)
+            reservation, metered_seconds = await _reserve_metered_usage(
+                tool="transcribe_base64",
+                source=f"{safe_name}:{hashlib.sha256(raw).hexdigest()}",
+                paths=[local],
+                request_id=request_id,
+            )
+            response = await _post_to_whisper(local, format, language)
+            result = _format_result(
+                response,
+                format,
+                title=local.stem,
+                source=safe_name,
+                source_kind="inline_base64",
+            )
+            _complete_metered_usage(reservation, metered_seconds)
+            return result
     except ValidationError as exc:
+        _fail_metered_usage(reservation)
         return f"Rejected: {exc}"
-    with tempfile.TemporaryDirectory() as td:
-        local = Path(td) / safe_name
-        local.write_bytes(raw)
-        response = await _post_to_whisper(local, format, language)
-        return _format_result(
-            response, format, title=local.stem, source=safe_name, source_kind="inline_base64"
-        )
+    except Exception:
+        _fail_metered_usage(reservation)
+        raise
 
 
 @mcp.tool()
