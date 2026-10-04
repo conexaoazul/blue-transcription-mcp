@@ -1,56 +1,62 @@
 # Blue Transcription MCP — Conexão Azul
 
-Fork operacional de `MarcusTseng/mcp-whisper`, adaptado para Docker Swarm.
+Página comercial: https://www.conexaoazul.com/blue-transcription-mcp
 
-## Arquitetura
+## Posicionamento
 
-- `transcription_whisper`: `ggml-org/whisper.cpp`, modelo multilingual `small`, CPU-only.
-- `transcription_mcp`: FastMCP/Streamable HTTP com Bearer auth via Docker Secret.
-- Ambos ficam no `blueops-oci-worker-1`; o leader `azul2` não executa inferência.
-- Entrada pública somente via Traefik em `https://mcp-origin.conexaoazul.com/transcribe/mcp`.
-- Backend Whisper não publica porta externa.
+Serviço de ingestão, normalização e transcrição para automações e agentes. O foco não é apenas “gerar texto”, mas encaixar áudio, vídeo e ZIPs em fluxos operacionais com limites, rastreabilidade e integração via MCP/HTTP.
 
-## Tools
+## Capacidades
 
 - `transcribe_file`
-- `transcribe_base64` (extensão Blue; até 25 MiB por padrão)
-- `transcribe_batch` (arquivos locais, concorrência limitada)
-- `transcribe_zip` (ZIP seguro; OPUS/OGG/M4A/MP3/WAV e vídeo suportado)
+- `transcribe_base64`
+- `transcribe_batch`
+- `transcribe_zip`
+- `transcribe_zip_base64`
 - `transcribe_url`
 - `transcribe_youtube`
 - `transcribe_podcast`
 
+## Arquitetura recomendada
+
+- backend `whisper.cpp` privado;
+- FastMCP/Streamable HTTP na borda de integração;
+- token interno lido de arquivo/secret, nunca embutido em prompt ou URL;
+- proxy/ingress com TLS e autenticação adequada ao cliente;
+- ffmpeg para normalização de formatos;
+- armazenamento temporário limitado e manifest por lote.
+
+O ambiente pode ser Docker Compose ou Swarm. A posição do runtime (OCI, on-premises ou outro worker) é decisão de implantação e não deve ser assumida pelo código.
+
 ## Segurança
 
-- MCP exige Bearer token e lê o segredo de `/run/secrets/transcription_mcp_auth`.
-- Container MCP roda non-root e rootfs read-only; temporários usam `TMPDIR=/data/output`.
-- A imagem inicializa `/data/output` com ownership UID 1000; `/healthz` valida escrita no volume.
-- URLs remotas mantêm as proteções SSRF do upstream.
-- `transcribe_file`, `transcribe_batch` e `transcribe_zip` são restritos a `/data/inbox`.
-- ZIP usa basename sanitizado, rejeita symlink e impõe limites de arquivo/expansão.
-- Batch inicia com concorrência máxima 1 no Swarm para proteger o worker OCI de 2 OCPU.
+- containers non-root quando suportado e rootfs read-only para o MCP;
+- URLs remotas com proteção SSRF;
+- roots locais permitidos explicitamente;
+- ZIP com allowlist de extensões, rejeição de symlink, limite de entradas, limite por item e limite total de extração;
+- concorrência limitada para proteger CPU/RAM;
+- hashes SHA-256 para rastrear archive e mídia extraída;
+- backend ASR sem porta pública por padrão;
+- autenticação do endpoint separada do motor de transcrição.
 
 ## Deploy
 
-```bash
-# criar uma vez, sem imprimir o token
-openssl rand -hex 32 | docker secret create transcription_mcp_auth -
-
-# build/push da imagem MCP
-TAG=$(git rev-parse --short HEAD)
-docker build -t ghcr.io/conexaoazul/blue-transcription-mcp:$TAG .
-gh auth token | docker login ghcr.io -u conexaoazul --password-stdin
-docker push ghcr.io/conexaoazul/blue-transcription-mcp:$TAG
-
-# deploy
-IMAGE_TAG=$TAG docker stack deploy -c deploy/stack.yml transcription --with-registry-auth
-```
+Use os manifests de `deploy/` como referência e ajuste placement, recursos, modelo e ingress ao ambiente real. Evite acoplar a documentação a um hostname de worker específico.
 
 ## Smoke
 
-```bash
-curl -fsS https://mcp-origin.conexaoazul.com/transcribe/healthz
-# tools/list exige Authorization: Bearer <token>
-```
+Valide pelo menos:
 
-A imagem do `whisper.cpp` está fixada por digest. O modelo é baixado para volume local do worker na primeira inicialização.
+1. `/healthz`;
+2. MCP `initialize`;
+3. `tools/list`;
+4. ZIP inválido/base64 inválido;
+5. symlink em ZIP rejeitado;
+6. ZIP misto selecionando apenas mídia suportada;
+7. uma inferência real;
+8. manifest com hashes;
+9. backend Whisper inacessível externamente.
+
+## Licenças e upstream
+
+Este repositório deriva de `MarcusTseng/mcp-whisper` e usa `whisper.cpp`. A Conexão Azul oferece implantação, integração, hardening e operação; não reivindica propriedade sobre os projetos upstream.

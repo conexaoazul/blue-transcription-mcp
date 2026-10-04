@@ -1,3 +1,25 @@
+# Blue Transcription MCP
+
+**Áudio, vídeo e ZIPs em lote para ChatGPT, agentes de IA, n8n e integrações — com processamento local-first via whisper.cpp.**
+
+Produto/serviço Conexão Azul: https://www.conexaoazul.com/blue-transcription-mcp
+
+Este repositório é um fork operacional de `MarcusTseng/mcp-whisper` mantido pela Conexão Azul. Além do fluxo original de transcrição, a variante Conexão Azul adiciona ingestão segura de ZIP, batch, inline Base64, manifestos com hash e perfil de deploy para infraestrutura privada.
+
+## O que a variante Conexão Azul adiciona
+
+- `transcribe_base64` para mídia recebida por clientes MCP sem filesystem compartilhado.
+- `transcribe_batch` com concorrência limitada.
+- `transcribe_zip` e `transcribe_zip_base64` com allowlist de mídia, rejeição de symlink e limites de expansão.
+- SHA-256 do arquivo e dos membros extraídos no manifest.
+- Streamable HTTP / FastMCP com bearer auth por arquivo de segredo.
+- Deploy Docker/Swarm com backend whisper.cpp privado.
+- Uso com ChatGPT por endpoint MCP governado; autenticação externa pode ser protegida por mTLS/OAuth conforme o ambiente.
+
+> A Conexão Azul comercializa a implantação, operação e integração do serviço. whisper.cpp e os componentes upstream mantêm suas próprias licenças e não são apresentados como tecnologia proprietária da Conexão Azul.
+
+---
+
 # mcp-whisper
 
 A local-first MCP server that exposes a whisper.cpp HTTP backend as eight
