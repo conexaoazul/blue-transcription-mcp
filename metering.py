@@ -264,12 +264,17 @@ class MeteringStore:
                 self._cleanup_stale(conn, now)
                 existing = conn.execute(
                     """
-                    SELECT id, tenant_id, request_id, reserved_seconds, status
+                    SELECT id, tenant_id, request_id, reserved_seconds, status,
+                           source_hash
                     FROM usage_events WHERE idempotency_key = ?
                     """,
                     (idem,),
                 ).fetchone()
                 if existing:
+                    if existing["source_hash"] != source_hash:
+                        raise MeteringError(
+                            "request_id was already used for a different source"
+                        )
                     conn.commit()
                     return Reservation(
                         event_id=int(existing["id"]),
