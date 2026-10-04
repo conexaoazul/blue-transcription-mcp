@@ -29,6 +29,17 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from metering import (
+    CURRENT_TENANT,
+    ConcurrencyExceeded,
+    MeteringError,
+    QuotaExceeded,
+    RequestIdRequired,
+    TrialExpired,
+    TenantUnauthorized,
+    store_from_env,
+)
+
 WHISPER_URL = os.environ.get(
     "WHISPER_URL", "http://host.docker.internal:8082/v1/audio/transcriptions"
 )
@@ -83,6 +94,7 @@ MCP_ALLOWED_ORIGINS = [
 
 Format = Literal["text", "json", "srt", "vtt", "md"]
 WHISPER_FORMAT = {"text": "json", "json": "verbose_json", "srt": "srt", "vtt": "vtt", "md": "verbose_json"}
+METERING_STORE = store_from_env()
 
 mcp = FastMCP(
     "whisper-transcribe",
@@ -217,6 +229,71 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+async def _probe_duration_seconds(path: Path) -> float:
+    """Return media duration using ffprobe; metered tenants fail closed on unknown duration."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise ValidationError(
+            f"Unable to determine media duration for quota metering: "
+            f"{stderr.decode(errors='replace')[-200:]}"
+        )
+    try:
+        duration = float(stdout.decode().strip())
+    except ValueError as exc:
+        raise ValidationError("Unable to determine media duration for quota metering") from exc
+    if duration <= 0:
+        raise ValidationError("Media duration must be greater than zero")
+    return duration
+
+
+async def _reserve_metered_usage(
+    *,
+    tool: str,
+    source: str,
+    paths: list[Path],
+    request_id: str | None,
+):
+    """Reserve tenant quota before inference. Master-token calls are not metered."""
+    tenant = CURRENT_TENANT.get()
+    if tenant is None or METERING_STORE is None:
+        return None, 0.0
+
+    total_seconds = 0.0
+    for path in paths:
+        total_seconds += await _probe_duration_seconds(path)
+
+    try:
+        reservation = METERING_STORE.reserve(
+            tenant,
+            tool=tool,
+            source=source,
+            seconds=total_seconds,
+            request_id=request_id,
+        )
+    except (RequestIdRequired, TrialExpired, QuotaExceeded, ConcurrencyExceeded, MeteringError) as exc:
+        raise ValidationError(f"metering: {exc}") from exc
+    return reservation, total_seconds
+
+
+def _complete_metered_usage(reservation, seconds: float) -> None:
+    if reservation is not None and METERING_STORE is not None:
+        METERING_STORE.complete(reservation, seconds)
+
+
+def _fail_metered_usage(reservation) -> None:
+    if reservation is not None and METERING_STORE is not None:
+        METERING_STORE.fail(reservation)
 
 
 # ---------------- whisper.cpp client ----------------------------------------
@@ -447,6 +524,8 @@ async def _transcribe_zip_archive(
     *,
     archive_limit: int,
     archive_kind: str,
+    metering_tool: str | None = None,
+    request_id: str | None = None,
 ) -> dict:
     """Apply the same bounded/safe ZIP extraction policy to any trusted local temp path."""
     if zip_path.suffix.lower() != ".zip" or not zipfile.is_zipfile(zip_path):
@@ -539,7 +618,26 @@ async def _transcribe_zip_archive(
                 + ", ".join(sorted(SUPPORTED_MEDIA_EXTENSIONS))
             )
 
-        manifest = await _run_batch(items, fmt, language, concurrency)
+        reservation = None
+        metered_seconds = 0.0
+        try:
+            reservation, metered_seconds = await _reserve_metered_usage(
+                tool=metering_tool or archive_kind,
+                source=archive_label,
+                paths=[item[0] for item in items],
+                request_id=request_id,
+            )
+            manifest = await _run_batch(items, fmt, language, concurrency)
+            _complete_metered_usage(reservation, metered_seconds)
+        except Exception:
+            _fail_metered_usage(reservation)
+            raise
+
+        if reservation is not None:
+            manifest["usage_seconds"] = round(metered_seconds, 3)
+            if METERING_STORE is not None and reservation.tenant_id:
+                manifest["usage"] = METERING_STORE.usage_summary(reservation.tenant_id)
+
         manifest.update(
             {
                 "archive": archive_label,
@@ -559,48 +657,79 @@ async def _transcribe_zip_archive(
 # ---------------- MCP tools -------------------------------------------------
 
 @mcp.tool()
-async def transcribe_file(path: str, format: Format = "text", language: str | None = None) -> str:
+async def transcribe_file(
+    path: str,
+    format: Format = "text",
+    language: str | None = None,
+    request_id: str | None = None,
+) -> str:
     """Transcribe a local audio/video file.
 
-    The path must resolve inside one of the allowed input roots
-    (configured via ALLOWED_INPUT_ROOTS — defaults: ~/Downloads, ~/Music,
-    ~/whisper.cpp/samples). Symlink escapes and ../ traversal are rejected.
-
-    Args:
-        path: Absolute path to the audio or video file.
-        format: text | json | srt | vtt | md.
-        language: ISO 639-1 code, omit for auto-detect.
+    For metered tenants, request_id must be stable across retries so usage is
+    idempotent. Master-token/operator calls remain unmetered.
     """
+    reservation = None
     try:
         p = _validate_input_path(path)
+        reservation, metered_seconds = await _reserve_metered_usage(
+            tool="transcribe_file",
+            source=str(p),
+            paths=[p],
+            request_id=request_id,
+        )
+        title = p.stem
+        response = await _post_to_whisper(p, format, language)
+        result = _format_result(
+            response, format, title=title, source=str(p), source_kind="file"
+        )
+        _complete_metered_usage(reservation, metered_seconds)
+        return result
     except ValidationError as e:
+        _fail_metered_usage(reservation)
         return f"Rejected: {e}"
-    title = p.stem
-    response = await _post_to_whisper(p, format, language)
-    return _format_result(response, format, title=title, source=str(p), source_kind="file")
+    except Exception:
+        _fail_metered_usage(reservation)
+        raise
 
 
 @mcp.tool()
 async def transcribe_base64(
-    filename: str, data_base64: str, format: Format = "text", language: str | None = None
+    filename: str,
+    data_base64: str,
+    format: Format = "text",
+    language: str | None = None,
+    request_id: str | None = None,
 ) -> str:
-    """Transcribe inline base64 audio/video data.
-
-    Intended for MCP clients that have attachment bytes but no shared filesystem or public URL.
-    The decoded payload is capped by MAX_INLINE_BYTES (25 MiB by default).
-    """
+    """Transcribe inline base64 audio/video data with optional tenant metering."""
     safe_name = Path(filename).name or "attachment.bin"
+    reservation = None
     try:
         raw = _decode_base64_limited(data_base64, MAX_INLINE_BYTES, "inline media")
+        with tempfile.TemporaryDirectory() as td:
+            local = Path(td) / safe_name
+            local.write_bytes(raw)
+            reservation, metered_seconds = await _reserve_metered_usage(
+                tool="transcribe_base64",
+                source=f"{safe_name}:{hashlib.sha256(raw).hexdigest()}",
+                paths=[local],
+                request_id=request_id,
+            )
+            response = await _post_to_whisper(local, format, language)
+            result = _format_result(
+                response,
+                format,
+                title=local.stem,
+                source=safe_name,
+                source_kind="inline_base64",
+            )
+            _complete_metered_usage(reservation, metered_seconds)
+            return result
     except ValidationError as exc:
+        _fail_metered_usage(reservation)
         return f"Rejected: {exc}"
-    with tempfile.TemporaryDirectory() as td:
-        local = Path(td) / safe_name
-        local.write_bytes(raw)
-        response = await _post_to_whisper(local, format, language)
-        return _format_result(
-            response, format, title=local.stem, source=safe_name, source_kind="inline_base64"
-        )
+    except Exception:
+        _fail_metered_usage(reservation)
+        raise
 
 
 @mcp.tool()
@@ -609,18 +738,16 @@ async def transcribe_batch(
     format: Format = "text",
     language: str | None = None,
     concurrency: int | None = None,
+    request_id: str | None = None,
 ) -> str:
-    """Transcribe multiple local audio/video files with bounded concurrency.
-
-    Every path must pass the same allowed-root validation as transcribe_file.
-    Unsupported extensions and oversized files are rejected before inference.
-    """
+    """Transcribe multiple local audio/video files with bounded concurrency."""
     if not paths:
         return "Rejected: paths must contain at least one file"
     if len(paths) > MAX_BATCH_FILES:
         return f"Rejected: batch has {len(paths)} files; limit is {MAX_BATCH_FILES}"
 
     items: list[tuple[Path, str, str, str]] = []
+    reservation = None
     try:
         for raw_path in paths:
             p = _validate_input_path(raw_path)
@@ -632,11 +759,26 @@ async def transcribe_batch(
                     f"File {p.name} is {size} bytes; item limit is {MAX_BATCH_ITEM_BYTES}"
                 )
             items.append((p, str(p), "batch_file", p.stem))
-    except ValidationError as exc:
-        return f"Rejected: {exc}"
 
-    manifest = await _run_batch(items, format, language, concurrency)
-    return json.dumps(manifest, indent=2, ensure_ascii=False)
+        reservation, metered_seconds = await _reserve_metered_usage(
+            tool="transcribe_batch",
+            source="|".join(str(item[0]) for item in items),
+            paths=[item[0] for item in items],
+            request_id=request_id,
+        )
+        manifest = await _run_batch(items, format, language, concurrency)
+        _complete_metered_usage(reservation, metered_seconds)
+        if reservation is not None:
+            manifest["usage_seconds"] = round(metered_seconds, 3)
+            if METERING_STORE is not None and reservation.tenant_id:
+                manifest["usage"] = METERING_STORE.usage_summary(reservation.tenant_id)
+        return json.dumps(manifest, indent=2, ensure_ascii=False)
+    except ValidationError as exc:
+        _fail_metered_usage(reservation)
+        return f"Rejected: {exc}"
+    except Exception:
+        _fail_metered_usage(reservation)
+        raise
 
 
 @mcp.tool()
@@ -645,6 +787,7 @@ async def transcribe_zip(
     format: Format = "text",
     language: str | None = None,
     concurrency: int | None = None,
+    request_id: str | None = None,
 ) -> str:
     """Safely extract and transcribe supported media files from a local ZIP."""
     try:
@@ -657,6 +800,8 @@ async def transcribe_zip(
             concurrency,
             archive_limit=MAX_BATCH_ITEM_BYTES,
             archive_kind="local_zip",
+            metering_tool="transcribe_zip",
+            request_id=request_id,
         )
         return json.dumps(manifest, indent=2, ensure_ascii=False)
     except ValidationError as exc:
@@ -670,6 +815,7 @@ async def transcribe_zip_base64(
     format: Format = "text",
     language: str | None = None,
     concurrency: int | None = None,
+    request_id: str | None = None,
 ) -> str:
     """Safely transcribe a ZIP supplied inline as base64.
 
@@ -697,6 +843,8 @@ async def transcribe_zip_base64(
                 concurrency,
                 archive_limit=MAX_INLINE_ZIP_BYTES,
                 archive_kind="inline_base64_zip",
+                metering_tool="transcribe_zip_base64",
+                request_id=request_id,
             )
             return json.dumps(manifest, indent=2, ensure_ascii=False)
     except ValidationError as exc:
@@ -704,36 +852,68 @@ async def transcribe_zip_base64(
 
 
 @mcp.tool()
-async def transcribe_url(url: str, format: Format = "text", language: str | None = None) -> str:
-    """Transcribe audio from an http(s) URL (direct link to mp3/wav/m4a/etc).
-
-    Only public http(s) URLs are accepted; private/loopback/link-local hosts
-    are rejected. The download is capped at MAX_DOWNLOAD_BYTES (default 500MB).
-    """
+async def transcribe_url(
+    url: str,
+    format: Format = "text",
+    language: str | None = None,
+    request_id: str | None = None,
+) -> str:
+    """Transcribe audio from a public http(s) URL with optional tenant metering."""
+    reservation = None
     try:
         with tempfile.TemporaryDirectory() as td:
             local = await _download(url, Path(td))
+            reservation, metered_seconds = await _reserve_metered_usage(
+                tool="transcribe_url",
+                source=url,
+                paths=[local],
+                request_id=request_id,
+            )
             title = Path(urlparse(url).path).stem or "url-audio"
             response = await _post_to_whisper(local, format, language)
-            return _format_result(response, format, title=title, source=url, source_kind="url")
+            result = _format_result(
+                response, format, title=title, source=url, source_kind="url"
+            )
+            _complete_metered_usage(reservation, metered_seconds)
+            return result
     except ValidationError as e:
+        _fail_metered_usage(reservation)
         return f"Rejected: {e}"
+    except Exception:
+        _fail_metered_usage(reservation)
+        raise
 
 
 @mcp.tool()
-async def transcribe_youtube(url: str, format: Format = "text", language: str | None = None) -> str:
-    """Transcribe a YouTube (or yt-dlp-supported) video via audio extraction.
-
-    URL is validated (http/https + public host) before yt-dlp sees it,
-    closing yt-dlp's file:// and internal-host vectors.
-    """
+async def transcribe_youtube(
+    url: str,
+    format: Format = "text",
+    language: str | None = None,
+    request_id: str | None = None,
+) -> str:
+    """Transcribe a yt-dlp-supported URL with optional tenant metering."""
+    reservation = None
     try:
         with tempfile.TemporaryDirectory() as td:
             audio, title = await _ytdlp_extract(url, Path(td))
+            reservation, metered_seconds = await _reserve_metered_usage(
+                tool="transcribe_youtube",
+                source=url,
+                paths=[audio],
+                request_id=request_id,
+            )
             response = await _post_to_whisper(audio, format, language)
-            return _format_result(response, format, title=title, source=url, source_kind="youtube")
+            result = _format_result(
+                response, format, title=title, source=url, source_kind="youtube"
+            )
+            _complete_metered_usage(reservation, metered_seconds)
+            return result
     except ValidationError as e:
+        _fail_metered_usage(reservation)
         return f"Rejected: {e}"
+    except Exception:
+        _fail_metered_usage(reservation)
+        raise
 
 
 @mcp.tool()
@@ -742,6 +922,7 @@ async def transcribe_podcast(
     episode_index: int = 0,
     format: Format = "md",
     language: str | None = None,
+    request_id: str | None = None,
 ) -> str:
     """Transcribe a podcast episode from an RSS feed.
 
@@ -782,15 +963,32 @@ async def transcribe_podcast(
     podcast_title = feed.feed.get("title", "Podcast")
     full_title = f"{podcast_title} - {title}"
 
+    reservation = None
     try:
         with tempfile.TemporaryDirectory() as td:
             local = await _download(chosen_url, Path(td))
-            response = await _post_to_whisper(local, format, language)
-            return _format_result(
-                response, format, title=full_title, source=chosen_url, source_kind="podcast"
+            reservation, metered_seconds = await _reserve_metered_usage(
+                tool="transcribe_podcast",
+                source=chosen_url,
+                paths=[local],
+                request_id=request_id,
             )
+            response = await _post_to_whisper(local, format, language)
+            result = _format_result(
+                response,
+                format,
+                title=full_title,
+                source=chosen_url,
+                source_kind="podcast",
+            )
+            _complete_metered_usage(reservation, metered_seconds)
+            return result
     except ValidationError as e:
+        _fail_metered_usage(reservation)
         return f"Rejected: {e}"
+    except Exception:
+        _fail_metered_usage(reservation)
+        raise
 
 
 # ---------------- entrypoint ------------------------------------------------
@@ -799,7 +997,6 @@ if __name__ == "__main__":
     transport = os.environ.get("TRANSPORT", "stdio").lower()
     if transport in ("http", "streamable-http"):
         import uvicorn
-        from starlette.middleware.base import BaseHTTPMiddleware
         from starlette.responses import JSONResponse
 
         token = os.environ.get("MCP_AUTH_TOKEN", "").strip()
@@ -819,15 +1016,55 @@ if __name__ == "__main__":
             sys.exit(1)
         expected = f"Bearer {token}".encode()
 
-        class BearerAuth(BaseHTTPMiddleware):
-            async def dispatch(self, request, call_next):
-                if request.url.path == "/healthz":
-                    return await call_next(request)
-                hdr = request.headers.get("authorization", "").encode()
-                # Constant-time compare to avoid token-length timing oracles.
-                if not hmac.compare_digest(hdr, expected):
-                    return JSONResponse({"error": "unauthorized"}, status_code=401)
-                return await call_next(request)
+        class TenantBearerAuth:
+            """Pure ASGI auth middleware so ContextVar reaches MCP tool execution."""
+
+            def __init__(self, inner):
+                self.inner = inner
+
+            async def __call__(self, scope, receive, send):
+                if scope.get("type") != "http":
+                    return await self.inner(scope, receive, send)
+
+                path = scope.get("path", "")
+                if path == "/healthz":
+                    return await self.inner(scope, receive, send)
+
+                headers = {
+                    key.decode("latin-1").lower(): value.decode("latin-1")
+                    for key, value in scope.get("headers", [])
+                }
+                auth = headers.get("authorization", "")
+                auth_bytes = auth.encode()
+
+                # Operator/master token preserves existing behavior and bypasses
+                # tenant metering. It is never interpreted as a tenant API key.
+                if hmac.compare_digest(auth_bytes, expected):
+                    ctx_token = CURRENT_TENANT.set(None)
+                    try:
+                        return await self.inner(scope, receive, send)
+                    finally:
+                        CURRENT_TENANT.reset(ctx_token)
+
+                if METERING_STORE is None or not auth.startswith("Bearer "):
+                    response = JSONResponse({"error": "unauthorized"}, status_code=401)
+                    return await response(scope, receive, send)
+
+                api_key = auth[7:].strip()
+                try:
+                    tenant = METERING_STORE.get_tenant_by_api_key(api_key)
+                except TrialExpired:
+                    response = JSONResponse({"error": "access_expired"}, status_code=403)
+                    return await response(scope, receive, send)
+                except TenantUnauthorized:
+                    response = JSONResponse({"error": "unauthorized"}, status_code=401)
+                    return await response(scope, receive, send)
+
+                ctx_token = CURRENT_TENANT.set(tenant)
+                try:
+                    return await self.inner(scope, receive, send)
+                finally:
+                    CURRENT_TENANT.reset(ctx_token)
 
         # Ensure output dir exists eagerly in HTTP mode so we don't surprise
         # callers with mkdir failures later.
@@ -839,12 +1076,25 @@ if __name__ == "__main__":
             output_writable = OUTPUT_DIR.exists() and os.access(OUTPUT_DIR, os.W_OK)
             status = "ok" if output_writable else "degraded"
             return JSONResponse(
-                {"status": status, "output_writable": output_writable},
+                {
+                    "status": status,
+                    "output_writable": output_writable,
+                    "metering_enabled": METERING_STORE is not None,
+                },
                 status_code=200 if output_writable else 503,
             )
 
+        async def usage(_request):
+            tenant = CURRENT_TENANT.get()
+            if tenant is None or METERING_STORE is None:
+                return JSONResponse(
+                    {"error": "tenant_context_required"}, status_code=400
+                )
+            return JSONResponse(METERING_STORE.usage_summary(tenant.id))
+
         app.add_route("/healthz", healthz, methods=["GET"])
-        app.add_middleware(BearerAuth)
+        app.add_route("/usage", usage, methods=["GET"])
+        app = TenantBearerAuth(app)
         host = os.environ.get("HOST", "0.0.0.0")
         port = int(os.environ.get("PORT", "8083"))
         uvicorn.run(app, host=host, port=port)

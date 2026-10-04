@@ -1,0 +1,78 @@
+services:
+  mcp-metered-canary:
+    image: ${CANDIDATE_IMAGE:?set CANDIDATE_IMAGE to an immutable digest}
+    user: "1000:1000"
+    read_only: true
+    environment:
+      TRANSPORT: http
+      HOST: 0.0.0.0
+      PORT: "8083"
+      WHISPER_URL: http://transcription_whisper:8082/v1/audio/transcriptions
+      MCP_AUTH_TOKEN_FILE: /run/secrets/transcription_mcp_auth
+      METERING_ENABLED: "1"
+      METERING_DB: /data/metering/metering.sqlite3
+      METERING_REQUIRE_REQUEST_ID: "1"
+      METERING_LEASE_SECONDS: "1800"
+      OUTPUT_DIR: /data/output
+      TMPDIR: /tmp
+      MAX_INLINE_BYTES: "26214400"
+      MAX_INLINE_ZIP_BYTES: "26214400"
+      MAX_BATCH_FILES: "100"
+      BATCH_CONCURRENCY: "1"
+      MAX_BATCH_ITEM_BYTES: "262144000"
+      MAX_ZIP_EXTRACT_BYTES: "536870912"
+      MAX_ZIP_ENTRIES: "5000"
+      MAX_DOWNLOAD_BYTES: "524288000"
+      MCP_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,mcp-metered-canary:8083"
+      MCP_ALLOWED_ORIGINS: "http://127.0.0.1:*,http://localhost:*"
+    secrets:
+      - source: transcription_mcp_auth
+        target: transcription_mcp_auth
+        uid: "1000"
+        gid: "1000"
+        mode: 0400
+    volumes:
+      - metering_data:/data/metering
+      - metering_output:/data/output
+    tmpfs:
+      - /tmp:size=536870912,uid=1000,gid=1000,mode=0700
+    networks:
+      - transcribe
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8083/healthz',timeout=3)); raise SystemExit(0 if d.get('status')=='ok' and d.get('metering_enabled') is True else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      # Deliberately disabled. Scale only during an isolated canary.
+      replicas: 0
+      resources:
+        reservations:
+          cpus: "0.10"
+          memory: 128M
+        limits:
+          cpus: "0.50"
+          memory: 768M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+
+networks:
+  transcribe:
+    external: true
+    name: transcription_transcribe
+
+volumes:
+  metering_data:
+  metering_output:
+
+secrets:
+  transcription_mcp_auth:
+    external: true

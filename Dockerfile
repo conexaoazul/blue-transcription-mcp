@@ -15,6 +15,8 @@ RUN pip install --no-cache-dir \
     feedparser
 
 COPY server.py /app/server.py
+COPY metering.py /app/metering.py
+COPY tenant_admin.py /app/tenant_admin.py
 COPY grpc_gateway.py /app/grpc_gateway.py
 COPY proto /app/proto
 
