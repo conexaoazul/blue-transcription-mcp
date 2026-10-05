@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from metering import (
+    CallLimitExceeded,
     ConcurrencyExceeded,
     MeteringStore,
     QuotaExceeded,
@@ -77,6 +78,56 @@ class MeteringTests(unittest.TestCase):
         summary = self.store.usage_summary(self.tenant.id)
         self.assertEqual(summary["used_seconds"], 30)
         self.assertEqual(summary["completed_calls"], 1)
+
+    def test_total_call_limit_blocks_new_request_but_not_replay(self):
+        limited, _ = self.store.create_tenant(
+            tenant_id="total-limited",
+            name="Total Limited",
+            plan="trial",
+            quota_seconds=3600,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+            max_concurrency=1,
+            max_calls_total=2,
+        )
+        first = self.store.reserve(
+            limited,
+            tool="transcribe_base64",
+            source="a.wav",
+            seconds=10,
+            request_id="total-1",
+        )
+        self.store.complete(first, 10)
+        second = self.store.reserve(
+            limited,
+            tool="transcribe_base64",
+            source="b.wav",
+            seconds=10,
+            request_id="total-2",
+        )
+        self.store.complete(second, 10)
+
+        replay = self.store.reserve(
+            limited,
+            tool="transcribe_base64",
+            source="a.wav",
+            seconds=10,
+            request_id="total-1",
+        )
+        self.assertTrue(replay.replay)
+
+        with self.assertRaises(CallLimitExceeded):
+            self.store.reserve(
+                limited,
+                tool="transcribe_base64",
+                source="c.wav",
+                seconds=10,
+                request_id="total-3",
+            )
+
+        summary = self.store.usage_summary(limited.id)
+        self.assertEqual(summary["max_calls_total"], 2)
+        self.assertEqual(summary["calls_total"], 2)
+        self.assertEqual(summary["completed_calls"], 2)
 
     def test_hourly_call_limit_blocks_new_request_but_not_replay(self):
         limited, _ = self.store.create_tenant(
@@ -155,6 +206,7 @@ class MeteringTests(unittest.TestCase):
                 for row in check.execute("PRAGMA table_info(tenants)").fetchall()
             }
         self.assertIn("max_calls_per_hour", columns)
+        self.assertIn("max_calls_total", columns)
 
     def test_quota_blocks_projected_usage(self):
         first = self.store.reserve(
