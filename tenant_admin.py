@@ -2,7 +2,8 @@
 
 Examples:
   python tenant_admin.py create --id acme-trial --name "ACME" --plan trial \
-    --quota-minutes 120 --days 7 --max-concurrency 1
+    --quota-minutes 120 --days 7 --max-concurrency 1 \
+    --max-calls-per-hour 20 --max-calls-total 200
 
   python tenant_admin.py usage --id acme-trial
   python tenant_admin.py rotate-key --id acme-trial
@@ -39,8 +40,8 @@ def main() -> None:
     create.add_argument("--quota-minutes", type=float, default=120)
     create.add_argument("--days", type=int, default=7)
     create.add_argument("--max-concurrency", type=int, default=1)
-    create.add_argument("--max-calls-per-hour", type=int, default=0)
-    create.add_argument("--max-calls-total", type=int, default=0)
+    create.add_argument("--max-calls-per-hour", type=int, default=20)
+    create.add_argument("--max-calls-total", type=int, default=200)
 
     usage = sub.add_parser("usage")
     usage.add_argument("--id", required=True)
