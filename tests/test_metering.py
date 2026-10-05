@@ -10,6 +10,7 @@ from metering import (
     QuotaExceeded,
     RateLimitExceeded,
     RequestIdRequired,
+    SyncDurationExceeded,
     TrialExpired,
     TenantUnauthorized,
 )
@@ -207,6 +208,48 @@ class MeteringTests(unittest.TestCase):
             }
         self.assertIn("max_calls_per_hour", columns)
         self.assertIn("max_calls_total", columns)
+        self.assertIn("max_sync_seconds", columns)
+
+    def test_sync_duration_limit_blocks_new_request_but_not_replay(self):
+        limited, _ = self.store.create_tenant(
+            tenant_id="sync-limited",
+            name="Sync Limited",
+            plan="trial",
+            quota_seconds=3600,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+            max_concurrency=1,
+            max_sync_seconds=30,
+        )
+        first = self.store.reserve(
+            limited,
+            tool="transcribe_base64",
+            source="a.wav",
+            seconds=30,
+            request_id="sync-1",
+        )
+        self.store.complete(first, 30)
+
+        replay = self.store.reserve(
+            limited,
+            tool="transcribe_base64",
+            source="a.wav",
+            seconds=120,
+            request_id="sync-1",
+        )
+        self.assertTrue(replay.replay)
+
+        with self.assertRaises(SyncDurationExceeded):
+            self.store.reserve(
+                limited,
+                tool="transcribe_base64",
+                source="b.wav",
+                seconds=30.001,
+                request_id="sync-2",
+            )
+
+        summary = self.store.usage_summary(limited.id)
+        self.assertEqual(summary["max_sync_seconds"], 30)
+        self.assertEqual(summary["completed_calls"], 1)
 
     def test_quota_blocks_projected_usage(self):
         first = self.store.reserve(

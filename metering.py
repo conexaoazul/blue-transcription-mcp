@@ -36,6 +36,7 @@ class Tenant:
     max_concurrency: int
     max_calls_per_hour: int
     max_calls_total: int
+    max_sync_seconds: float
     active: bool
 
 
@@ -76,6 +77,10 @@ class RateLimitExceeded(MeteringError):
 
 
 class CallLimitExceeded(MeteringError):
+    pass
+
+
+class SyncDurationExceeded(MeteringError):
     pass
 
 
@@ -120,6 +125,7 @@ class MeteringStore:
                     max_concurrency INTEGER NOT NULL DEFAULT 1,
                     max_calls_per_hour INTEGER NOT NULL DEFAULT 0,
                     max_calls_total INTEGER NOT NULL DEFAULT 0,
+                    max_sync_seconds REAL NOT NULL DEFAULT 0,
                     active INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL
                 );
@@ -168,6 +174,11 @@ class MeteringStore:
                     "ALTER TABLE tenants ADD COLUMN "
                     "max_calls_total INTEGER NOT NULL DEFAULT 0"
                 )
+            if "max_sync_seconds" not in columns:
+                conn.execute(
+                    "ALTER TABLE tenants ADD COLUMN "
+                    "max_sync_seconds REAL NOT NULL DEFAULT 0"
+                )
 
     @staticmethod
     def hash_api_key(api_key: str) -> str:
@@ -199,7 +210,7 @@ class MeteringStore:
             row = conn.execute(
                 """
                 SELECT id, name, plan, quota_seconds, expires_at,
-                       max_concurrency, max_calls_per_hour, max_calls_total, active
+                       max_concurrency, max_calls_per_hour, max_calls_total, max_sync_seconds, active
                 FROM tenants WHERE id = ?
                 """,
                 (tenant_id,),
@@ -215,6 +226,7 @@ class MeteringStore:
             max_concurrency=int(row["max_concurrency"]),
             max_calls_per_hour=int(row["max_calls_per_hour"]),
             max_calls_total=int(row["max_calls_total"]),
+            max_sync_seconds=float(row["max_sync_seconds"]),
             active=bool(row["active"]),
         )
 
@@ -229,6 +241,7 @@ class MeteringStore:
         max_concurrency: int = 1,
         max_calls_per_hour: int = 0,
         max_calls_total: int = 0,
+        max_sync_seconds: float = 0,
         api_key: str | None = None,
     ) -> tuple[Tenant, str]:
         clean_id = tenant_id.strip()
@@ -242,6 +255,9 @@ class MeteringStore:
             raise ValueError("max_calls_per_hour must be >= 0")
         if max_calls_total < 0:
             raise ValueError("max_calls_total must be >= 0")
+        max_sync_seconds = float(max_sync_seconds)
+        if max_sync_seconds < 0:
+            raise ValueError("max_sync_seconds must be >= 0")
         api_key = api_key or f"btm_{secrets.token_urlsafe(32)}"
         tenant = Tenant(
             id=clean_id,
@@ -252,6 +268,7 @@ class MeteringStore:
             max_concurrency=int(max_concurrency),
             max_calls_per_hour=int(max_calls_per_hour),
             max_calls_total=int(max_calls_total),
+            max_sync_seconds=max_sync_seconds,
             active=True,
         )
         with self._lock, self._connect() as conn:
@@ -261,8 +278,9 @@ class MeteringStore:
                     """
                     INSERT INTO tenants
                     (id, name, key_hash, plan, quota_seconds, expires_at,
-                     max_concurrency, max_calls_per_hour, max_calls_total, active, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                     max_concurrency, max_calls_per_hour, max_calls_total, max_sync_seconds,
+                     active, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                     """,
                     (
                         tenant.id,
@@ -274,6 +292,7 @@ class MeteringStore:
                         tenant.max_concurrency,
                         tenant.max_calls_per_hour,
                         tenant.max_calls_total,
+                        tenant.max_sync_seconds,
                         _iso(_utcnow()),
                     ),
                 )
@@ -289,6 +308,7 @@ class MeteringStore:
                         "max_concurrency": tenant.max_concurrency,
                         "max_calls_per_hour": tenant.max_calls_per_hour,
                         "max_calls_total": tenant.max_calls_total,
+                        "max_sync_seconds": tenant.max_sync_seconds,
                     },
                 )
                 conn.commit()
@@ -333,6 +353,7 @@ class MeteringStore:
         max_concurrency: int | None = None,
         max_calls_per_hour: int | None = None,
         max_calls_total: int | None = None,
+        max_sync_seconds: float | None = None,
     ) -> Tenant:
         updates: dict[str, object] = {}
         if name is not None:
@@ -365,6 +386,11 @@ class MeteringStore:
             if max_calls_total < 0:
                 raise ValueError("max_calls_total must be >= 0")
             updates["max_calls_total"] = max_calls_total
+        if max_sync_seconds is not None:
+            max_sync_seconds = float(max_sync_seconds)
+            if max_sync_seconds < 0:
+                raise ValueError("max_sync_seconds must be >= 0")
+            updates["max_sync_seconds"] = max_sync_seconds
         if set_expires_at:
             updates["expires_at"] = _iso(expires_at)
 
@@ -444,7 +470,7 @@ class MeteringStore:
             row = conn.execute(
                 """
                 SELECT id, name, plan, quota_seconds, expires_at,
-                       max_concurrency, max_calls_per_hour, max_calls_total, active
+                       max_concurrency, max_calls_per_hour, max_calls_total, max_sync_seconds, active
                 FROM tenants WHERE key_hash = ?
                 """,
                 (key_hash,),
@@ -461,6 +487,7 @@ class MeteringStore:
             max_concurrency=int(row["max_concurrency"]),
             max_calls_per_hour=int(row["max_calls_per_hour"]),
             max_calls_total=int(row["max_calls_total"]),
+            max_sync_seconds=float(row["max_sync_seconds"]),
             active=bool(row["active"]),
         )
         self._validate_tenant(tenant)
@@ -532,6 +559,13 @@ class MeteringStore:
                         request_id=existing["request_id"],
                         reserved_seconds=float(existing["reserved_seconds"]),
                         replay=True,
+                    )
+
+                if tenant.max_sync_seconds > 0 and seconds > tenant.max_sync_seconds:
+                    raise SyncDurationExceeded(
+                        "synchronous media duration limit is "
+                        f"{tenant.max_sync_seconds:.3f} seconds; "
+                        f"requested_seconds={seconds:.3f}"
                     )
 
                 if tenant.max_calls_per_hour > 0:
@@ -658,7 +692,7 @@ class MeteringStore:
             tenant = conn.execute(
                 """
                 SELECT id, name, plan, quota_seconds, expires_at,
-                       max_concurrency, max_calls_per_hour, max_calls_total, active
+                       max_concurrency, max_calls_per_hour, max_calls_total, max_sync_seconds, active
                 FROM tenants WHERE id=?
                 """,
                 (tenant_id,),
@@ -699,6 +733,7 @@ class MeteringStore:
             "max_concurrency": int(tenant["max_concurrency"]),
             "max_calls_per_hour": int(tenant["max_calls_per_hour"]),
             "max_calls_total": int(tenant["max_calls_total"]),
+            "max_sync_seconds": float(tenant["max_sync_seconds"]),
             "calls_last_hour": int(calls_last_hour),
             "calls_total": int(
                 (usage["completed_calls"] or 0)

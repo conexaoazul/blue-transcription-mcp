@@ -138,6 +138,17 @@ All knobs are environment variables (see `.env.example`):
 | `METERING_REQUIRE_REQUEST_ID` | `1` | Require stable request IDs for idempotent tenant charging |
 | `METERING_LEASE_SECONDS` | `1800` | Timeout for in-flight usage reservations |
 
+Managed tenants can also carry per-tenant entitlements such as quota, concurrency,
+hourly/total call caps and a **synchronous media-duration ceiling**
+(`max_sync_seconds`). A value of `0` keeps that ceiling disabled for backward
+compatibility. Managed plans should set it from the commercial/control-plane
+policy rather than hard-coding it in the MCP process.
+
+The synchronous ceiling is intentionally separate from the overall quota:
+long media may fit within a monthly/trial allowance but still be inappropriate
+for one interactive MCP request. Media above the synchronous ceiling should be
+handled by an asynchronous job flow once that surface is enabled.
+
 ## Wiring into MCP clients
 
 ### Claude Code / Codex / Cursor (remote HTTP)
