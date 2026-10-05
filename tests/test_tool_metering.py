@@ -31,17 +31,16 @@ class ToolMeteringTests(unittest.IsolatedAsyncioTestCase):
         server.METERING_STORE = self.original_store
         self.tmp.cleanup()
 
-    async def test_tool_charges_duration_once_across_replay(self):
+    async def test_tool_suppresses_inference_across_replay(self):
         token = CURRENT_TENANT.set(self.tenant)
         payload = base64.b64encode(b"fake-audio").decode()
+        whisper = AsyncMock(return_value={"text": "ok"})
         try:
             with (
                 patch.object(
                     server, "_probe_duration_seconds", AsyncMock(return_value=30.0)
                 ),
-                patch.object(
-                    server, "_post_to_whisper", AsyncMock(return_value={"text": "ok"})
-                ),
+                patch.object(server, "_post_to_whisper", whisper),
             ):
                 first = await server.transcribe_base64(
                     "a.wav", payload, request_id="req-1"
@@ -53,7 +52,8 @@ class ToolMeteringTests(unittest.IsolatedAsyncioTestCase):
             CURRENT_TENANT.reset(token)
 
         self.assertEqual(first, "ok")
-        self.assertEqual(replay, "ok")
+        self.assertIn("inference replay suppressed", replay)
+        self.assertEqual(whisper.await_count, 1)
         summary = self.store.usage_summary(self.tenant.id)
         self.assertEqual(summary["used_seconds"], 30)
         self.assertEqual(summary["completed_calls"], 1)
