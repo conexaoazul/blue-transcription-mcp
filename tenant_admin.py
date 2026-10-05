@@ -39,6 +39,7 @@ def main() -> None:
     create.add_argument("--quota-minutes", type=float, default=120)
     create.add_argument("--days", type=int, default=7)
     create.add_argument("--max-concurrency", type=int, default=1)
+    create.add_argument("--max-calls-per-hour", type=int, default=0)
 
     usage = sub.add_parser("usage")
     usage.add_argument("--id", required=True)
@@ -53,6 +54,7 @@ def main() -> None:
     update.add_argument("--quota-minutes", type=float)
     update.add_argument("--days", type=int)
     update.add_argument("--max-concurrency", type=int)
+    update.add_argument("--max-calls-per-hour", type=int)
 
     suspend = sub.add_parser("suspend")
     suspend.add_argument("--id", required=True)
@@ -80,6 +82,7 @@ def main() -> None:
             quota_seconds=args.quota_minutes * 60,
             expires_at=expires,
             max_concurrency=args.max_concurrency,
+            max_calls_per_hour=args.max_calls_per_hour,
         )
         # The key is printed once. The DB stores only its SHA-256 digest.
         print(json.dumps({
@@ -88,6 +91,7 @@ def main() -> None:
             "quota_seconds": tenant.quota_seconds,
             "expires_at": tenant.expires_at.isoformat() if tenant.expires_at else None,
             "max_concurrency": tenant.max_concurrency,
+            "max_calls_per_hour": tenant.max_calls_per_hour,
             "api_key": api_key,
         }, indent=2))
         return
@@ -115,6 +119,7 @@ def main() -> None:
             expires_at=expires_at,
             set_expires_at=set_expires_at,
             max_concurrency=args.max_concurrency,
+            max_calls_per_hour=args.max_calls_per_hour,
         )
         print(json.dumps({
             "tenant_id": tenant.id,
@@ -123,6 +128,7 @@ def main() -> None:
             "quota_seconds": tenant.quota_seconds,
             "expires_at": tenant.expires_at.isoformat() if tenant.expires_at else None,
             "max_concurrency": tenant.max_concurrency,
+            "max_calls_per_hour": tenant.max_calls_per_hour,
             "active": tenant.active,
         }, indent=2))
         return

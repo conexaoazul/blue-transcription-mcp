@@ -34,6 +34,7 @@ from metering import (
     ConcurrencyExceeded,
     MeteringError,
     QuotaExceeded,
+    RateLimitExceeded,
     RequestIdRequired,
     TrialExpired,
     TenantUnauthorized,
@@ -281,7 +282,14 @@ async def _reserve_metered_usage(
             seconds=total_seconds,
             request_id=request_id,
         )
-    except (RequestIdRequired, TrialExpired, QuotaExceeded, ConcurrencyExceeded, MeteringError) as exc:
+    except (
+        RequestIdRequired,
+        TrialExpired,
+        QuotaExceeded,
+        ConcurrencyExceeded,
+        RateLimitExceeded,
+        MeteringError,
+    ) as exc:
         raise ValidationError(f"metering: {exc}") from exc
     return reservation, total_seconds
 
