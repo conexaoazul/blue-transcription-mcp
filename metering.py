@@ -35,6 +35,7 @@ class Tenant:
     expires_at: datetime | None
     max_concurrency: int
     max_calls_per_hour: int
+    max_calls_total: int
     active: bool
 
 
@@ -71,6 +72,10 @@ class ConcurrencyExceeded(MeteringError):
 
 
 class RateLimitExceeded(MeteringError):
+    pass
+
+
+class CallLimitExceeded(MeteringError):
     pass
 
 
@@ -114,6 +119,7 @@ class MeteringStore:
                     expires_at TEXT,
                     max_concurrency INTEGER NOT NULL DEFAULT 1,
                     max_calls_per_hour INTEGER NOT NULL DEFAULT 0,
+                    max_calls_total INTEGER NOT NULL DEFAULT 0,
                     active INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL
                 );
@@ -157,6 +163,11 @@ class MeteringStore:
                     "ALTER TABLE tenants ADD COLUMN "
                     "max_calls_per_hour INTEGER NOT NULL DEFAULT 0"
                 )
+            if "max_calls_total" not in columns:
+                conn.execute(
+                    "ALTER TABLE tenants ADD COLUMN "
+                    "max_calls_total INTEGER NOT NULL DEFAULT 0"
+                )
 
     @staticmethod
     def hash_api_key(api_key: str) -> str:
@@ -188,7 +199,7 @@ class MeteringStore:
             row = conn.execute(
                 """
                 SELECT id, name, plan, quota_seconds, expires_at,
-                       max_concurrency, max_calls_per_hour, active
+                       max_concurrency, max_calls_per_hour, max_calls_total, active
                 FROM tenants WHERE id = ?
                 """,
                 (tenant_id,),
@@ -203,6 +214,7 @@ class MeteringStore:
             expires_at=datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None,
             max_concurrency=int(row["max_concurrency"]),
             max_calls_per_hour=int(row["max_calls_per_hour"]),
+            max_calls_total=int(row["max_calls_total"]),
             active=bool(row["active"]),
         )
 
@@ -216,6 +228,7 @@ class MeteringStore:
         expires_at: datetime | None,
         max_concurrency: int = 1,
         max_calls_per_hour: int = 0,
+        max_calls_total: int = 0,
         api_key: str | None = None,
     ) -> tuple[Tenant, str]:
         clean_id = tenant_id.strip()
@@ -227,6 +240,8 @@ class MeteringStore:
             raise ValueError("quota_seconds must be >= 0")
         if max_calls_per_hour < 0:
             raise ValueError("max_calls_per_hour must be >= 0")
+        if max_calls_total < 0:
+            raise ValueError("max_calls_total must be >= 0")
         api_key = api_key or f"btm_{secrets.token_urlsafe(32)}"
         tenant = Tenant(
             id=clean_id,
@@ -236,6 +251,7 @@ class MeteringStore:
             expires_at=expires_at,
             max_concurrency=int(max_concurrency),
             max_calls_per_hour=int(max_calls_per_hour),
+            max_calls_total=int(max_calls_total),
             active=True,
         )
         with self._lock, self._connect() as conn:
@@ -245,8 +261,8 @@ class MeteringStore:
                     """
                     INSERT INTO tenants
                     (id, name, key_hash, plan, quota_seconds, expires_at,
-                     max_concurrency, max_calls_per_hour, active, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                     max_concurrency, max_calls_per_hour, max_calls_total, active, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                     """,
                     (
                         tenant.id,
@@ -257,6 +273,7 @@ class MeteringStore:
                         _iso(tenant.expires_at),
                         tenant.max_concurrency,
                         tenant.max_calls_per_hour,
+                        tenant.max_calls_total,
                         _iso(_utcnow()),
                     ),
                 )
@@ -271,6 +288,7 @@ class MeteringStore:
                         "expires_at": _iso(tenant.expires_at),
                         "max_concurrency": tenant.max_concurrency,
                         "max_calls_per_hour": tenant.max_calls_per_hour,
+                        "max_calls_total": tenant.max_calls_total,
                     },
                 )
                 conn.commit()
@@ -314,6 +332,7 @@ class MeteringStore:
         set_expires_at: bool = False,
         max_concurrency: int | None = None,
         max_calls_per_hour: int | None = None,
+        max_calls_total: int | None = None,
     ) -> Tenant:
         updates: dict[str, object] = {}
         if name is not None:
@@ -341,6 +360,11 @@ class MeteringStore:
             if max_calls_per_hour < 0:
                 raise ValueError("max_calls_per_hour must be >= 0")
             updates["max_calls_per_hour"] = max_calls_per_hour
+        if max_calls_total is not None:
+            max_calls_total = int(max_calls_total)
+            if max_calls_total < 0:
+                raise ValueError("max_calls_total must be >= 0")
+            updates["max_calls_total"] = max_calls_total
         if set_expires_at:
             updates["expires_at"] = _iso(expires_at)
 
@@ -420,7 +444,7 @@ class MeteringStore:
             row = conn.execute(
                 """
                 SELECT id, name, plan, quota_seconds, expires_at,
-                       max_concurrency, max_calls_per_hour, active
+                       max_concurrency, max_calls_per_hour, max_calls_total, active
                 FROM tenants WHERE key_hash = ?
                 """,
                 (key_hash,),
@@ -436,6 +460,7 @@ class MeteringStore:
             expires_at=expires_at,
             max_concurrency=int(row["max_concurrency"]),
             max_calls_per_hour=int(row["max_calls_per_hour"]),
+            max_calls_total=int(row["max_calls_total"]),
             active=bool(row["active"]),
         )
         self._validate_tenant(tenant)
@@ -523,6 +548,16 @@ class MeteringStore:
                         raise RateLimitExceeded(
                             "tenant hourly call limit is "
                             f"{tenant.max_calls_per_hour}"
+                        )
+
+                if tenant.max_calls_total > 0:
+                    total_calls = conn.execute(
+                        "SELECT COUNT(*) AS n FROM usage_events WHERE tenant_id=?",
+                        (tenant.id,),
+                    ).fetchone()["n"]
+                    if int(total_calls) >= tenant.max_calls_total:
+                        raise CallLimitExceeded(
+                            f"tenant total call limit is {tenant.max_calls_total}"
                         )
 
                 active = conn.execute(
@@ -623,7 +658,7 @@ class MeteringStore:
             tenant = conn.execute(
                 """
                 SELECT id, name, plan, quota_seconds, expires_at,
-                       max_concurrency, max_calls_per_hour, active
+                       max_concurrency, max_calls_per_hour, max_calls_total, active
                 FROM tenants WHERE id=?
                 """,
                 (tenant_id,),
@@ -638,7 +673,8 @@ class MeteringStore:
                   COALESCE(SUM(CASE WHEN status='reserved'
                     THEN reserved_seconds ELSE 0 END),0) AS reserved,
                   SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed_calls,
-                  SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_calls
+                  SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_calls,
+                  SUM(CASE WHEN status='reserved' THEN 1 ELSE 0 END) AS reserved_calls
                 FROM usage_events WHERE tenant_id=?
                 """,
                 (tenant_id,),
@@ -662,7 +698,13 @@ class MeteringStore:
             "expires_at": tenant["expires_at"],
             "max_concurrency": int(tenant["max_concurrency"]),
             "max_calls_per_hour": int(tenant["max_calls_per_hour"]),
+            "max_calls_total": int(tenant["max_calls_total"]),
             "calls_last_hour": int(calls_last_hour),
+            "calls_total": int(
+                (usage["completed_calls"] or 0)
+                + (usage["failed_calls"] or 0)
+                + (usage["reserved_calls"] or 0)
+            ),
             "quota_seconds": quota,
             "used_seconds": used,
             "reserved_seconds": reserved,
