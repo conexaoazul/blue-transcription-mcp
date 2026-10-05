@@ -262,7 +262,7 @@ class MeteringStore:
                     INSERT INTO tenants
                     (id, name, key_hash, plan, quota_seconds, expires_at,
                      max_concurrency, max_calls_per_hour, max_calls_total, active, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                     """,
                     (
                         tenant.id,
@@ -673,7 +673,8 @@ class MeteringStore:
                   COALESCE(SUM(CASE WHEN status='reserved'
                     THEN reserved_seconds ELSE 0 END),0) AS reserved,
                   SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed_calls,
-                  SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_calls
+                  SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_calls,
+                  SUM(CASE WHEN status='reserved' THEN 1 ELSE 0 END) AS reserved_calls
                 FROM usage_events WHERE tenant_id=?
                 """,
                 (tenant_id,),
@@ -699,7 +700,11 @@ class MeteringStore:
             "max_calls_per_hour": int(tenant["max_calls_per_hour"]),
             "max_calls_total": int(tenant["max_calls_total"]),
             "calls_last_hour": int(calls_last_hour),
-            "calls_total": int((usage["completed_calls"] or 0) + (usage["failed_calls"] or 0)),
+            "calls_total": int(
+                (usage["completed_calls"] or 0)
+                + (usage["failed_calls"] or 0)
+                + (usage["reserved_calls"] or 0)
+            ),
             "quota_seconds": quota,
             "used_seconds": used,
             "reserved_seconds": reserved,
