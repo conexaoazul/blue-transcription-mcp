@@ -7,6 +7,7 @@ before scaling the public metered endpoint horizontally.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
 import sqlite3
@@ -128,12 +129,66 @@ class MeteringStore:
 
                 CREATE INDEX IF NOT EXISTS idx_usage_tenant_status
                 ON usage_events(tenant_id, status);
+
+                CREATE TABLE IF NOT EXISTS tenant_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tenant_events_tenant_created
+                ON tenant_events(tenant_id, created_at);
                 """
             )
 
     @staticmethod
     def hash_api_key(api_key: str) -> str:
         return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _audit(
+        conn: sqlite3.Connection,
+        tenant_id: str,
+        event_type: str,
+        payload: dict | None = None,
+    ) -> None:
+        safe_payload = payload or {}
+        conn.execute(
+            """
+            INSERT INTO tenant_events (tenant_id, event_type, payload_json, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                tenant_id,
+                event_type,
+                json.dumps(safe_payload, sort_keys=True, separators=(",", ":")),
+                _iso(_utcnow()),
+            ),
+        )
+
+    def get_tenant(self, tenant_id: str) -> Tenant:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, name, plan, quota_seconds, expires_at,
+                       max_concurrency, active
+                FROM tenants WHERE id = ?
+                """,
+                (tenant_id,),
+            ).fetchone()
+        if not row:
+            raise KeyError(tenant_id)
+        return Tenant(
+            id=row["id"],
+            name=row["name"],
+            plan=row["plan"],
+            quota_seconds=float(row["quota_seconds"]),
+            expires_at=datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None,
+            max_concurrency=int(row["max_concurrency"]),
+            active=bool(row["active"]),
+        )
 
     def create_tenant(
         self,
@@ -184,11 +239,152 @@ class MeteringStore:
                         _iso(_utcnow()),
                     ),
                 )
+                self._audit(
+                    conn,
+                    tenant.id,
+                    "tenant_created",
+                    {
+                        "name": tenant.name,
+                        "plan": tenant.plan,
+                        "quota_seconds": tenant.quota_seconds,
+                        "expires_at": _iso(tenant.expires_at),
+                        "max_concurrency": tenant.max_concurrency,
+                    },
+                )
                 conn.commit()
             except Exception:
                 conn.rollback()
                 raise
         return tenant, api_key
+
+    def rotate_api_key(self, tenant_id: str, api_key: str | None = None) -> str:
+        """Rotate a tenant key. Returns the new plaintext key once."""
+        new_key = api_key or f"btm_{secrets.token_urlsafe(32)}"
+        new_hash = self.hash_api_key(new_key)
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT id FROM tenants WHERE id = ?",
+                    (tenant_id,),
+                ).fetchone()
+                if not row:
+                    raise KeyError(tenant_id)
+                conn.execute(
+                    "UPDATE tenants SET key_hash = ? WHERE id = ?",
+                    (new_hash, tenant_id),
+                )
+                self._audit(conn, tenant_id, "api_key_rotated")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return new_key
+
+    def update_tenant(
+        self,
+        tenant_id: str,
+        *,
+        name: str | None = None,
+        plan: str | None = None,
+        quota_seconds: float | None = None,
+        expires_at: datetime | None = None,
+        set_expires_at: bool = False,
+        max_concurrency: int | None = None,
+    ) -> Tenant:
+        updates: dict[str, object] = {}
+        if name is not None:
+            clean = name.strip()
+            if not clean:
+                raise ValueError("name must not be empty")
+            updates["name"] = clean
+        if plan is not None:
+            clean = plan.strip()
+            if not clean:
+                raise ValueError("plan must not be empty")
+            updates["plan"] = clean
+        if quota_seconds is not None:
+            quota_seconds = float(quota_seconds)
+            if quota_seconds < 0:
+                raise ValueError("quota_seconds must be >= 0")
+            updates["quota_seconds"] = quota_seconds
+        if max_concurrency is not None:
+            max_concurrency = int(max_concurrency)
+            if max_concurrency < 1:
+                raise ValueError("max_concurrency must be >= 1")
+            updates["max_concurrency"] = max_concurrency
+        if set_expires_at:
+            updates["expires_at"] = _iso(expires_at)
+
+        if not updates:
+            return self.get_tenant(tenant_id)
+
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if not conn.execute(
+                    "SELECT 1 FROM tenants WHERE id = ?",
+                    (tenant_id,),
+                ).fetchone():
+                    raise KeyError(tenant_id)
+                set_clause = ", ".join(f"{column} = ?" for column in updates)
+                conn.execute(
+                    f"UPDATE tenants SET {set_clause} WHERE id = ?",
+                    (*updates.values(), tenant_id),
+                )
+                self._audit(conn, tenant_id, "tenant_updated", updates)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return self.get_tenant(tenant_id)
+
+    def set_active(self, tenant_id: str, active: bool) -> Tenant:
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if not conn.execute(
+                    "SELECT 1 FROM tenants WHERE id = ?",
+                    (tenant_id,),
+                ).fetchone():
+                    raise KeyError(tenant_id)
+                conn.execute(
+                    "UPDATE tenants SET active = ? WHERE id = ?",
+                    (1 if active else 0, tenant_id),
+                )
+                self._audit(
+                    conn,
+                    tenant_id,
+                    "tenant_activated" if active else "tenant_suspended",
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return self.get_tenant(tenant_id)
+
+    def lifecycle_events(self, tenant_id: str, limit: int = 50) -> list[dict]:
+        limit = max(1, min(int(limit), 500))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, event_type, payload_json, created_at
+                FROM tenant_events
+                WHERE tenant_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (tenant_id, limit),
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "event_type": row["event_type"],
+                "payload": json.loads(row["payload_json"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
 
     def get_tenant_by_api_key(self, api_key: str) -> Tenant:
         key_hash = self.hash_api_key(api_key)
