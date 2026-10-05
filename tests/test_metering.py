@@ -7,6 +7,7 @@ from metering import (
     ConcurrencyExceeded,
     MeteringStore,
     QuotaExceeded,
+    RateLimitExceeded,
     RequestIdRequired,
     TrialExpired,
     TenantUnauthorized,
@@ -76,6 +77,84 @@ class MeteringTests(unittest.TestCase):
         summary = self.store.usage_summary(self.tenant.id)
         self.assertEqual(summary["used_seconds"], 30)
         self.assertEqual(summary["completed_calls"], 1)
+
+    def test_hourly_call_limit_blocks_new_request_but_not_replay(self):
+        limited, _ = self.store.create_tenant(
+            tenant_id="rate-limited",
+            name="Rate Limited",
+            plan="trial",
+            quota_seconds=3600,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+            max_concurrency=1,
+            max_calls_per_hour=2,
+        )
+        first = self.store.reserve(
+            limited,
+            tool="transcribe_base64",
+            source="a.wav",
+            seconds=10,
+            request_id="rate-1",
+        )
+        self.store.complete(first, 10)
+        second = self.store.reserve(
+            limited,
+            tool="transcribe_base64",
+            source="b.wav",
+            seconds=10,
+            request_id="rate-2",
+        )
+        self.store.complete(second, 10)
+
+        replay = self.store.reserve(
+            limited,
+            tool="transcribe_base64",
+            source="a.wav",
+            seconds=10,
+            request_id="rate-1",
+        )
+        self.assertTrue(replay.replay)
+
+        with self.assertRaises(RateLimitExceeded):
+            self.store.reserve(
+                limited,
+                tool="transcribe_base64",
+                source="c.wav",
+                seconds=10,
+                request_id="rate-3",
+            )
+
+        summary = self.store.usage_summary(limited.id)
+        self.assertEqual(summary["max_calls_per_hour"], 2)
+        self.assertEqual(summary["calls_last_hour"], 2)
+        self.assertEqual(summary["completed_calls"], 2)
+
+    def test_existing_schema_is_migrated_with_rate_limit_column(self):
+        legacy_path = Path(self.tmp.name) / "legacy.sqlite3"
+        import sqlite3
+        conn = sqlite3.connect(legacy_path)
+        conn.executescript(
+            """
+            CREATE TABLE tenants (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                key_hash TEXT NOT NULL UNIQUE,
+                plan TEXT NOT NULL,
+                quota_seconds REAL NOT NULL DEFAULT 0,
+                expires_at TEXT,
+                max_concurrency INTEGER NOT NULL DEFAULT 1,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.close()
+        migrated = MeteringStore(legacy_path, require_request_id=True)
+        with migrated._connect() as check:
+            columns = {
+                row["name"]
+                for row in check.execute("PRAGMA table_info(tenants)").fetchall()
+            }
+        self.assertIn("max_calls_per_hour", columns)
 
     def test_quota_blocks_projected_usage(self):
         first = self.store.reserve(
@@ -167,12 +246,14 @@ class MeteringTests(unittest.TestCase):
             plan="pro",
             quota_seconds=600,
             max_concurrency=3,
+            max_calls_per_hour=120,
             expires_at=None,
             set_expires_at=True,
         )
         self.assertEqual(upgraded.plan, "pro")
         self.assertEqual(upgraded.quota_seconds, 600)
         self.assertEqual(upgraded.max_concurrency, 3)
+        self.assertEqual(upgraded.max_calls_per_hour, 120)
         self.assertIsNone(upgraded.expires_at)
         summary = self.store.usage_summary(self.tenant.id)
         self.assertEqual(summary["used_seconds"], 30)
