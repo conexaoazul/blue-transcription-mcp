@@ -17,6 +17,8 @@ RUN pip install --no-cache-dir \
 COPY server.py /app/server.py
 COPY metering.py /app/metering.py
 COPY tenant_admin.py /app/tenant_admin.py
+COPY public_server.py /app/public_server.py
+COPY full_portal_server.py /app/full_portal_server.py
 COPY grpc_gateway.py /app/grpc_gateway.py
 COPY proto /app/proto
 

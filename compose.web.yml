@@ -11,6 +11,7 @@ services:
       TMPDIR: /data/output
       PORT: "8084"
       PUBLIC_CONCURRENCY: "1"
+      PUBLIC_FACADE_ENABLED: "0"
       PUBLIC_MAX_INLINE_BYTES: "26214400"
       PUBLIC_MAX_INLINE_ZIP_BYTES: "26214400"
     volumes:
