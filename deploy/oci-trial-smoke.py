@@ -73,7 +73,15 @@ def mcp_headers(api_key: str) -> dict[str, str]:
     return headers
 
 
-def call_tool(headers: dict[str, str], call_id: int, request_id: str, seconds: int):
+def call_tool(
+    headers: dict[str, str],
+    call_id: int,
+    request_id: str,
+    seconds: int,
+    *,
+    prompt: str | None = None,
+    carry_initial_prompt: bool = False,
+):
     payload = {
         "jsonrpc": "2.0",
         "id": call_id,
@@ -86,6 +94,8 @@ def call_tool(headers: dict[str, str], call_id: int, request_id: str, seconds: i
                 "format": "text",
                 "language": "pt",
                 "request_id": request_id,
+                "prompt": prompt,
+                "carry_initial_prompt": carry_initial_prompt,
             },
         },
     }
@@ -131,7 +141,14 @@ def main() -> None:
 
     headers1 = mcp_headers(key1)
     started = time.time()
-    first = call_tool(headers1, 2, "oci-canary-1", 1)
+    first = call_tool(
+        headers1,
+        2,
+        "oci-canary-1",
+        1,
+        prompt="Conexão Azul, Odoo, n8n, RENAINF, Nettcom",
+        carry_initial_prompt=True,
+    )
     first_elapsed = time.time() - started
     assert '"isError":true' not in first.replace(" ", ""), first[:800]
 
@@ -157,7 +174,7 @@ def main() -> None:
     headers2 = mcp_headers(key2)
 
     replay = call_tool(headers2, 3, "oci-canary-1", 1)
-    assert '"isError":true' not in replay.replace(" ", ""), replay[:800]
+    assert "inference replay suppressed" in replay, replay[:1200]
     replay_usage = usage(key2).json()
     assert replay_usage["completed_calls"] == 1, replay_usage
     assert 0.9 <= replay_usage["used_seconds"] <= 1.1, replay_usage
@@ -221,6 +238,8 @@ def main() -> None:
         "old_key_revoked": True,
         "suspend_blocks_auth": True,
         "replay_no_double_charge": True,
+        "replay_no_duplicate_inference": True,
+        "prompt_request_accepted": True,
         "sync_ceiling_blocks_before_usage": True,
         "call_caps_block_third_new_request": True,
         "upgrade_preserves_usage": True,

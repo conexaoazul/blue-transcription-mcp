@@ -15,10 +15,13 @@ import httpx
 
 
 class FakeWhisperHandler(BaseHTTPRequestHandler):
+    post_count = 0
+
     def log_message(self, _format, *_args):
         return
 
     def do_POST(self):
+        type(self).post_count += 1
         length = int(self.headers.get("content-length", "0"))
         if length:
             self.rfile.read(length)
@@ -195,6 +198,8 @@ def main() -> None:
         replay["id"] = 4
         r = httpx.post(base + "/mcp", headers=mcp_headers, json=replay, timeout=15)
         assert r.status_code == 200, r.text
+        assert "inference replay suppressed" in r.text, r.text
+        assert FakeWhisperHandler.post_count == 1, FakeWhisperHandler.post_count
 
         r = httpx.get(base + "/usage", headers=headers, timeout=3)
         replay_usage = r.json()

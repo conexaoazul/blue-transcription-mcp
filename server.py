@@ -299,6 +299,11 @@ async def _reserve_metered_usage(
             seconds=total_seconds,
             request_id=request_id,
         )
+        if reservation.replay:
+            raise ValidationError(
+                "metering: duplicate request_id; inference replay suppressed. "
+                "Use a new request_id only when recomputation is intentional."
+            )
     except (
         RequestIdRequired,
         TrialExpired,

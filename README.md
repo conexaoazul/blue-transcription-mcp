@@ -144,7 +144,7 @@ All knobs are environment variables (see `.env.example`):
 | `MAX_PROMPT_CHARS` | `1024` | Maximum request-scoped Whisper prompt length in characters |
 | `METERING_ENABLED` | `0` | Enable tenant API keys, quotas and usage accounting |
 | `METERING_DB` | `/data/metering/metering.sqlite3` | SQLite usage ledger path |
-| `METERING_REQUIRE_REQUEST_ID` | `1` | Require stable request IDs for idempotent tenant charging |
+| `METERING_REQUIRE_REQUEST_ID` | `1` | Require stable request IDs for duplicate-request suppression and idempotent charging |
 | `METERING_LEASE_SECONDS` | `1800` | Timeout for in-flight usage reservations |
 
 Managed tenants can also carry per-tenant entitlements such as quota, concurrency,
@@ -157,6 +157,13 @@ The synchronous ceiling is intentionally separate from the overall quota:
 long media may fit within a monthly/trial allowance but still be inappropriate
 for one interactive MCP request. Media above the synchronous ceiling should be
 handled by an asynchronous job flow once that surface is enabled.
+
+For metered tenants, a repeated `request_id` is treated as a duplicate request:
+Blue Transcription does **not** charge it again and does **not** run Whisper
+again. To intentionally recompute the same media, send a new `request_id`.
+This fail-closed behavior avoids storing transcript payloads only to implement a
+server-side replay cache.
+
 
 ## Wiring into MCP clients
 
