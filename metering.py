@@ -420,7 +420,7 @@ class MeteringStore:
             row = conn.execute(
                 """
                 SELECT id, name, plan, quota_seconds, expires_at,
-                       max_concurrency, active
+                       max_concurrency, max_calls_per_hour, active
                 FROM tenants WHERE key_hash = ?
                 """,
                 (key_hash,),
@@ -435,6 +435,7 @@ class MeteringStore:
             quota_seconds=float(row["quota_seconds"]),
             expires_at=expires_at,
             max_concurrency=int(row["max_concurrency"]),
+            max_calls_per_hour=int(row["max_calls_per_hour"]),
             active=bool(row["active"]),
         )
         self._validate_tenant(tenant)
@@ -622,7 +623,7 @@ class MeteringStore:
             tenant = conn.execute(
                 """
                 SELECT id, name, plan, quota_seconds, expires_at,
-                       max_concurrency, active
+                       max_concurrency, max_calls_per_hour, active
                 FROM tenants WHERE id=?
                 """,
                 (tenant_id,),
