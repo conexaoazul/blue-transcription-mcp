@@ -714,6 +714,8 @@ async def transcribe_file(
     format: Format = "text",
     language: str | None = None,
     request_id: str | None = None,
+    prompt: str | None = None,
+    carry_initial_prompt: bool = False,
 ) -> str:
     """Transcribe a local audio/video file.
 
@@ -722,6 +724,7 @@ async def transcribe_file(
     """
     reservation = None
     try:
+        prompt = _normalize_prompt(prompt)
         p = _validate_input_path(path)
         reservation, metered_seconds = await _reserve_metered_usage(
             tool="transcribe_file",
@@ -730,7 +733,9 @@ async def transcribe_file(
             request_id=request_id,
         )
         title = p.stem
-        response = await _post_to_whisper(p, format, language)
+        response = await _post_to_whisper(
+            p, format, language, prompt, carry_initial_prompt
+        )
         result = _format_result(
             response, format, title=title, source=str(p), source_kind="file"
         )
@@ -751,11 +756,14 @@ async def transcribe_base64(
     format: Format = "text",
     language: str | None = None,
     request_id: str | None = None,
+    prompt: str | None = None,
+    carry_initial_prompt: bool = False,
 ) -> str:
     """Transcribe inline base64 audio/video data with optional tenant metering."""
     safe_name = Path(filename).name or "attachment.bin"
     reservation = None
     try:
+        prompt = _normalize_prompt(prompt)
         raw = _decode_base64_limited(data_base64, MAX_INLINE_BYTES, "inline media")
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / safe_name
@@ -766,7 +774,9 @@ async def transcribe_base64(
                 paths=[local],
                 request_id=request_id,
             )
-            response = await _post_to_whisper(local, format, language)
+            response = await _post_to_whisper(
+                local, format, language, prompt, carry_initial_prompt
+            )
             result = _format_result(
                 response,
                 format,
@@ -791,6 +801,8 @@ async def transcribe_batch(
     language: str | None = None,
     concurrency: int | None = None,
     request_id: str | None = None,
+    prompt: str | None = None,
+    carry_initial_prompt: bool = False,
 ) -> str:
     """Transcribe multiple local audio/video files with bounded concurrency."""
     if not paths:
@@ -801,6 +813,7 @@ async def transcribe_batch(
     items: list[tuple[Path, str, str, str]] = []
     reservation = None
     try:
+        prompt = _normalize_prompt(prompt)
         for raw_path in paths:
             p = _validate_input_path(raw_path)
             if not _supported_media_name(p.name):
@@ -818,7 +831,14 @@ async def transcribe_batch(
             paths=[item[0] for item in items],
             request_id=request_id,
         )
-        manifest = await _run_batch(items, format, language, concurrency)
+        manifest = await _run_batch(
+            items,
+            format,
+            language,
+            concurrency,
+            prompt,
+            carry_initial_prompt,
+        )
         _complete_metered_usage(reservation, metered_seconds)
         if reservation is not None:
             manifest["usage_seconds"] = round(metered_seconds, 3)
@@ -840,6 +860,8 @@ async def transcribe_zip(
     language: str | None = None,
     concurrency: int | None = None,
     request_id: str | None = None,
+    prompt: str | None = None,
+    carry_initial_prompt: bool = False,
 ) -> str:
     """Safely extract and transcribe supported media files from a local ZIP."""
     try:
@@ -850,6 +872,8 @@ async def transcribe_zip(
             format,
             language,
             concurrency,
+            prompt,
+            carry_initial_prompt,
             archive_limit=MAX_BATCH_ITEM_BYTES,
             archive_kind="local_zip",
             metering_tool="transcribe_zip",
@@ -868,6 +892,8 @@ async def transcribe_zip_base64(
     language: str | None = None,
     concurrency: int | None = None,
     request_id: str | None = None,
+    prompt: str | None = None,
+    carry_initial_prompt: bool = False,
 ) -> str:
     """Safely transcribe a ZIP supplied inline as base64.
 
@@ -893,6 +919,8 @@ async def transcribe_zip_base64(
                 format,
                 language,
                 concurrency,
+                prompt,
+                carry_initial_prompt,
                 archive_limit=MAX_INLINE_ZIP_BYTES,
                 archive_kind="inline_base64_zip",
                 metering_tool="transcribe_zip_base64",
@@ -909,10 +937,13 @@ async def transcribe_url(
     format: Format = "text",
     language: str | None = None,
     request_id: str | None = None,
+    prompt: str | None = None,
+    carry_initial_prompt: bool = False,
 ) -> str:
     """Transcribe audio from a public http(s) URL with optional tenant metering."""
     reservation = None
     try:
+        prompt = _normalize_prompt(prompt)
         with tempfile.TemporaryDirectory() as td:
             local = await _download(url, Path(td))
             reservation, metered_seconds = await _reserve_metered_usage(
@@ -922,7 +953,9 @@ async def transcribe_url(
                 request_id=request_id,
             )
             title = Path(urlparse(url).path).stem or "url-audio"
-            response = await _post_to_whisper(local, format, language)
+            response = await _post_to_whisper(
+                local, format, language, prompt, carry_initial_prompt
+            )
             result = _format_result(
                 response, format, title=title, source=url, source_kind="url"
             )
@@ -942,10 +975,13 @@ async def transcribe_youtube(
     format: Format = "text",
     language: str | None = None,
     request_id: str | None = None,
+    prompt: str | None = None,
+    carry_initial_prompt: bool = False,
 ) -> str:
     """Transcribe a yt-dlp-supported URL with optional tenant metering."""
     reservation = None
     try:
+        prompt = _normalize_prompt(prompt)
         with tempfile.TemporaryDirectory() as td:
             audio, title = await _ytdlp_extract(url, Path(td))
             reservation, metered_seconds = await _reserve_metered_usage(
@@ -954,7 +990,9 @@ async def transcribe_youtube(
                 paths=[audio],
                 request_id=request_id,
             )
-            response = await _post_to_whisper(audio, format, language)
+            response = await _post_to_whisper(
+                audio, format, language, prompt, carry_initial_prompt
+            )
             result = _format_result(
                 response, format, title=title, source=url, source_kind="youtube"
             )
@@ -975,6 +1013,8 @@ async def transcribe_podcast(
     format: Format = "md",
     language: str | None = None,
     request_id: str | None = None,
+    prompt: str | None = None,
+    carry_initial_prompt: bool = False,
 ) -> str:
     """Transcribe a podcast episode from an RSS feed.
 
@@ -983,6 +1023,7 @@ async def transcribe_podcast(
     enclosure but does have a video enclosure, the video is transcribed instead.
     """
     try:
+        prompt = _normalize_prompt(prompt)
         feed = await _fetch_feed(rss_url)
     except ValidationError as e:
         return f"Rejected: {e}"
@@ -1025,7 +1066,9 @@ async def transcribe_podcast(
                 paths=[local],
                 request_id=request_id,
             )
-            response = await _post_to_whisper(local, format, language)
+            response = await _post_to_whisper(
+                local, format, language, prompt, carry_initial_prompt
+            )
             result = _format_result(
                 response,
                 format,
