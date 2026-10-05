@@ -42,6 +42,12 @@ def main() -> None:
     create.add_argument("--max-concurrency", type=int, default=1)
     create.add_argument("--max-calls-per-hour", type=int, default=20)
     create.add_argument("--max-calls-total", type=int, default=200)
+    create.add_argument(
+        "--max-sync-minutes",
+        type=float,
+        default=0,
+        help="Maximum synchronous media duration; 0 disables the ceiling.",
+    )
 
     usage = sub.add_parser("usage")
     usage.add_argument("--id", required=True)
@@ -58,6 +64,7 @@ def main() -> None:
     update.add_argument("--max-concurrency", type=int)
     update.add_argument("--max-calls-per-hour", type=int)
     update.add_argument("--max-calls-total", type=int)
+    update.add_argument("--max-sync-minutes", type=float)
 
     suspend = sub.add_parser("suspend")
     suspend.add_argument("--id", required=True)
@@ -87,6 +94,7 @@ def main() -> None:
             max_concurrency=args.max_concurrency,
             max_calls_per_hour=args.max_calls_per_hour,
             max_calls_total=args.max_calls_total,
+            max_sync_seconds=args.max_sync_minutes * 60,
         )
         # The key is printed once. The DB stores only its SHA-256 digest.
         print(json.dumps({
@@ -97,6 +105,7 @@ def main() -> None:
             "max_concurrency": tenant.max_concurrency,
             "max_calls_per_hour": tenant.max_calls_per_hour,
             "max_calls_total": tenant.max_calls_total,
+            "max_sync_seconds": tenant.max_sync_seconds,
             "api_key": api_key,
         }, indent=2))
         return
@@ -126,6 +135,10 @@ def main() -> None:
             max_concurrency=args.max_concurrency,
             max_calls_per_hour=args.max_calls_per_hour,
             max_calls_total=args.max_calls_total,
+            max_sync_seconds=(
+                None if args.max_sync_minutes is None
+                else args.max_sync_minutes * 60
+            ),
         )
         print(json.dumps({
             "tenant_id": tenant.id,
@@ -136,6 +149,7 @@ def main() -> None:
             "max_concurrency": tenant.max_concurrency,
             "max_calls_per_hour": tenant.max_calls_per_hour,
             "max_calls_total": tenant.max_calls_total,
+            "max_sync_seconds": tenant.max_sync_seconds,
             "active": tenant.active,
         }, indent=2))
         return
