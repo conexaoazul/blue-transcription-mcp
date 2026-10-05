@@ -97,6 +97,39 @@ class ToolMeteringTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("quota exceeded", out)
         whisper.assert_not_awaited()
 
+    async def test_tool_rate_limit_rejects_before_second_inference(self):
+        limited, _ = self.store.create_tenant(
+            tenant_id="rate-tool",
+            name="Rate Tool",
+            plan="trial",
+            quota_seconds=3600,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+            max_concurrency=1,
+            max_calls_per_hour=1,
+        )
+        token = CURRENT_TENANT.set(limited)
+        payload = base64.b64encode(b"fake-audio").decode()
+        whisper = AsyncMock(return_value={"text": "ok"})
+        try:
+            with (
+                patch.object(
+                    server, "_probe_duration_seconds", AsyncMock(return_value=10.0)
+                ),
+                patch.object(server, "_post_to_whisper", whisper),
+            ):
+                first = await server.transcribe_base64(
+                    "a.wav", payload, request_id="rate-tool-1"
+                )
+                second = await server.transcribe_base64(
+                    "b.wav", payload, request_id="rate-tool-2"
+                )
+        finally:
+            CURRENT_TENANT.reset(token)
+
+        self.assertEqual(first, "ok")
+        self.assertIn("hourly call limit", second)
+        self.assertEqual(whisper.await_count, 1)
+
     async def test_master_context_bypasses_metering(self):
         token = CURRENT_TENANT.set(None)
         payload = base64.b64encode(b"fake-audio").decode()
