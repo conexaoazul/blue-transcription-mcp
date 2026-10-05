@@ -50,7 +50,7 @@ jobs:
           test -s /tmp/oci-trial-canary.rendered.yml
 
   publish-candidate:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/feat/batch-zip-transcription-20260925'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/feat/replay-safe-candidate-20261005'
     needs: test
     runs-on: ubuntu-latest
     permissions:
