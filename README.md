@@ -10,13 +10,15 @@ Produto/serviço Conexão Azul: https://www.conexaoazul.com/blue-transcription-m
 
 Este repositório é um fork operacional de `MarcusTseng/mcp-whisper` mantido pela Conexão Azul. Além do fluxo original de transcrição, a variante Conexão Azul adiciona ingestão segura de ZIP, batch, inline Base64, manifestos com hash e perfil de deploy para infraestrutura privada.
 
+O upstream permanece creditado e licenciado sob MIT. As extensões e modificações feitas neste fork pela Conexão Azul estão documentadas neste repositório e em [NOTICE.md](NOTICE.md).
+
 ## Community, Cloud e On-Prem
 
 O core deste repositório é a edição **Community/self-host**: você pode operar o software na sua própria infraestrutura e o volume fica limitado pelo hardware que você provisionar.
 
 A Conexão Azul oferece também operação gerenciada:
 
-- **Trial Cloud** — teste assistido de 7 dias ou até 120 minutos.
+- **Trial Cloud** — teste assistido de 7 dias ou até 120 minutos, com até 200 processamentos, máximo de 20 chamadas/h e concorrência 1.
 - **Cloud** — endpoint MCP gerenciado, healthcheck, atualização e monitoramento básico.
 - **Pro** — limites maiores, mais concorrência, integração assistida com n8n/webhook e suporte prioritário.
 - **Private / On-Prem** — runtime isolado ou instalado na infraestrutura do cliente, com política de rede, hardening, capacidade e suporte acordados.
@@ -90,8 +92,8 @@ write a file to `OUTPUT_DIR` and return its path; `text`/`json` return inline.
 ### Run
 
 ```bash
-git clone https://github.com/MarcusTseng/mcp-whisper
-cd mcp-whisper
+git clone https://github.com/conexaoazul/blue-transcription-mcp
+cd blue-transcription-mcp
 
 # Generate auth token
 echo "MCP_AUTH_TOKEN=$(openssl rand -hex 32)" > .env
@@ -127,7 +129,7 @@ All knobs are environment variables (see `.env.example`):
 | `MAX_INLINE_BYTES` | `26214400` (25MB) | Decoded cap for inline base64 media |
 | `MAX_INLINE_ZIP_BYTES` | same as `MAX_INLINE_BYTES` | Decoded cap for inline base64 ZIP archives |
 | `MAX_BATCH_FILES` | `100` | Maximum media items accepted by batch/ZIP |
-| `BATCH_CONCURRENCY` | `2` | Operator ceiling for simultaneous batch inference |
+| `BATCH_CONCURRENCY` | `1` | Operator ceiling for simultaneous batch inference |
 | `MAX_BATCH_ITEM_BYTES` | `262144000` (250MB) | Per-item limit for batch/ZIP |
 | `MAX_ZIP_EXTRACT_BYTES` | `1073741824` (1GiB) | Aggregate uncompressed ZIP cap |
 | `MAX_ZIP_ENTRIES` | `5000` | Maximum central-directory entries accepted in a ZIP |
