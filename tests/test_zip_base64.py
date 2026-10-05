@@ -19,7 +19,7 @@ def make_zip(entries):
     return bio.getvalue()
 
 
-async def fake_run_batch(items, fmt, language, concurrency):
+async def fake_run_batch(items, fmt, language, concurrency, prompt=None, carry_initial_prompt=False):
     out = Path("/tmp/out")
     out.mkdir(parents=True, exist_ok=True)
     manifest_path = out / "manifest.json"
@@ -68,6 +68,18 @@ class InlineZipTests(unittest.IsolatedAsyncioTestCase):
             ["PTT-1.opus", "PTT-2.ogg"],
         )
         self.assertTrue(all(len(member["sha256"]) == 64 for member in data["members"]))
+
+    async def test_prompt_is_not_persisted_in_zip_manifest(self):
+        secret_prompt = "CLIENT-SECRET-CONTEXT-DO-NOT-PERSIST"
+        raw = make_zip([("voice.opus", b"abc")])
+        with patch.object(server, "_run_batch", fake_run_batch):
+            out = await server.transcribe_zip_base64(
+                "whatsapp.zip",
+                base64.b64encode(raw).decode(),
+                prompt=secret_prompt,
+                carry_initial_prompt=True,
+            )
+        self.assertNotIn(secret_prompt, out)
 
     async def test_invalid_base64_is_rejected(self):
         out = await server.transcribe_zip_base64("whatsapp.zip", "%%%")
