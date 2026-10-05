@@ -42,6 +42,13 @@ jobs:
             blue-transcription-mcp:test \
             /tests/http_metering_smoke.py
 
+      - name: Validate OCI trial canary artifacts
+        run: |
+          python3 -m py_compile deploy/oci-trial-smoke.py
+          export CANDIDATE_IMAGE='ghcr.io/conexaoazul/blue-transcription-mcp-candidate@sha256:0000000000000000000000000000000000000000000000000000000000000000'
+          docker stack config -c deploy/oci-trial-canary.yml >/tmp/oci-trial-canary.rendered.yml
+          test -s /tmp/oci-trial-canary.rendered.yml
+
   publish-candidate:
     if: github.event_name == 'push' && github.ref == 'refs/heads/feat/batch-zip-transcription-20260925'
     needs: test
