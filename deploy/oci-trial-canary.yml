@@ -1,0 +1,175 @@
+services:
+  init-permissions:
+    image: ${CANDIDATE_IMAGE:?set CANDIDATE_IMAGE to an immutable GHCR digest}
+    user: "0:0"
+    read_only: true
+    entrypoint: ["/bin/sh", "-lc"]
+    command:
+      - |
+        mkdir -p /data/metering /data/output
+        chown -R 1000:1000 /data/metering /data/output
+        echo OCI_TRIAL_CANARY_INIT_OK
+    volumes:
+      - metering_data:/data/metering
+      - metering_output:/data/output
+    deploy:
+      replicas: 0
+      placement:
+        constraints:
+          - node.hostname == blueops-oci-worker-2
+      restart_policy:
+        condition: none
+
+  whisper-canary:
+    image: ghcr.io/ggml-org/whisper.cpp@sha256:56bbe81d2dc2e0bc886b6071efece9f1a4f2d0e8ed578db9f59a8cfcb1f2bf95
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -e
+        test -s /models/ggml-small.bin || ./models/download-ggml-model.sh small /models
+        exec ./build/bin/whisper-server \
+          --model /models/ggml-small.bin \
+          --host 0.0.0.0 --port 8082 \
+          --inference-path /v1/audio/transcriptions \
+          --convert --threads 4
+    volumes:
+      - whisper_models:/models
+    networks:
+      - canary
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo >/dev/tcp/127.0.0.1/8082'"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 180s
+    deploy:
+      replicas: 0
+      placement:
+        constraints:
+          - node.hostname == blueops-oci-worker-2
+      resources:
+        reservations:
+          cpus: "1.00"
+          memory: 1024M
+        limits:
+          cpus: "4.00"
+          memory: 4096M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+
+  mcp-metered-canary:
+    image: ${CANDIDATE_IMAGE:?set CANDIDATE_IMAGE to an immutable GHCR digest}
+    user: "1000:1000"
+    read_only: true
+    environment:
+      TRANSPORT: http
+      HOST: 0.0.0.0
+      PORT: "8083"
+      WHISPER_URL: http://whisper-canary:8082/v1/audio/transcriptions
+      MCP_AUTH_TOKEN_FILE: /run/secrets/transcription_mcp_auth
+      METERING_ENABLED: "1"
+      METERING_DB: /data/metering/metering.sqlite3
+      METERING_REQUIRE_REQUEST_ID: "1"
+      METERING_LEASE_SECONDS: "1800"
+      OUTPUT_DIR: /data/output
+      TMPDIR: /tmp
+      MAX_INLINE_BYTES: "26214400"
+      MAX_INLINE_ZIP_BYTES: "26214400"
+      MAX_BATCH_FILES: "100"
+      BATCH_CONCURRENCY: "1"
+      MAX_BATCH_ITEM_BYTES: "262144000"
+      MAX_ZIP_EXTRACT_BYTES: "536870912"
+      MAX_ZIP_ENTRIES: "5000"
+      MAX_DOWNLOAD_BYTES: "524288000"
+      MCP_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,mcp-metered-canary:8083,oci-trial-canary_mcp-metered-canary:8083"
+      MCP_ALLOWED_ORIGINS: "http://127.0.0.1:*,http://localhost:*"
+    secrets:
+      - source: transcription_mcp_auth
+        target: transcription_mcp_auth
+        uid: "1000"
+        gid: "1000"
+        mode: 0400
+    volumes:
+      - metering_data:/data/metering
+      - metering_output:/data/output
+    tmpfs:
+      - /tmp:size=536870912,uid=1000,gid=1000,mode=0700
+    networks:
+      - canary
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8083/healthz',timeout=3)); raise SystemExit(0 if d.get('status')=='ok' and d.get('metering_enabled') is True else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 25s
+    deploy:
+      replicas: 0
+      placement:
+        constraints:
+          - node.hostname == blueops-oci-worker-2
+      resources:
+        reservations:
+          cpus: "0.10"
+          memory: 128M
+        limits:
+          cpus: "1.00"
+          memory: 1024M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+
+  smoke:
+    image: ${CANDIDATE_IMAGE:?set CANDIDATE_IMAGE to an immutable GHCR digest}
+    user: "1000:1000"
+    read_only: true
+    entrypoint: ["python", "/oci-trial-smoke.py"]
+    environment:
+      METERING_DB: /data/metering/metering.sqlite3
+      METERING_REQUIRE_REQUEST_ID: "1"
+      MCP_URL: http://mcp-metered-canary:8083/mcp
+      USAGE_URL: http://mcp-metered-canary:8083/usage
+    configs:
+      - source: oci_trial_smoke_py
+        target: /oci-trial-smoke.py
+        uid: "1000"
+        gid: "1000"
+        mode: 0444
+    volumes:
+      - metering_data:/data/metering
+    tmpfs:
+      - /tmp:size=268435456,uid=1000,gid=1000,mode=0700
+    networks:
+      - canary
+    deploy:
+      replicas: 0
+      placement:
+        constraints:
+          - node.hostname == blueops-oci-worker-2
+      resources:
+        reservations:
+          cpus: "0.05"
+          memory: 64M
+        limits:
+          cpus: "0.50"
+          memory: 512M
+      restart_policy:
+        condition: none
+
+networks:
+  canary:
+    driver: overlay
+    attachable: true
+
+volumes:
+  whisper_models:
+  metering_data:
+  metering_output:
+
+secrets:
+  transcription_mcp_auth:
+    external: true
+
+configs:
+  oci_trial_smoke_py:
+    file: ./oci-trial-smoke.py
