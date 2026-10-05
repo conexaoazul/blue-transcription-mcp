@@ -15,7 +15,9 @@ from typing import Literal
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.applications import Starlette
 from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 import server as core
 
@@ -23,6 +25,9 @@ Format = Literal["text", "json", "srt", "vtt", "md"]
 PUBLIC_MAX_INLINE_BYTES = int(os.environ.get("PUBLIC_MAX_INLINE_BYTES", str(25 * 1024 * 1024)))
 PUBLIC_MAX_INLINE_ZIP_BYTES = int(os.environ.get("PUBLIC_MAX_INLINE_ZIP_BYTES", str(25 * 1024 * 1024)))
 PUBLIC_CONCURRENCY = max(1, int(os.environ.get("PUBLIC_CONCURRENCY", "1")))
+PUBLIC_FACADE_ENABLED = os.environ.get("PUBLIC_FACADE_ENABLED", "0").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 _gate = asyncio.Semaphore(PUBLIC_CONCURRENCY)
 
 mcp = FastMCP(
@@ -121,18 +126,39 @@ async def transcribe_zip_base64(
         return f"Rejected: {exc}"
 
 
-app = mcp.streamable_http_app()
-
-
 async def healthz(_request):
     return JSONResponse({
         "status": "ok",
-        "mode": "public-stateless",
-        "tools": ["transcribe_base64", "transcribe_zip_base64"],
+        "mode": "public-stateless" if PUBLIC_FACADE_ENABLED else "trial-closed",
+        "enabled": PUBLIC_FACADE_ENABLED,
+        "tools": ["transcribe_base64", "transcribe_zip_base64"] if PUBLIC_FACADE_ENABLED else [],
     })
 
 
-app.add_route("/healthz", healthz, methods=["GET"])
+async def closed(_request):
+    return JSONResponse(
+        {
+            "error": "trial_closed",
+            "message": (
+                "Blue Transcription managed trial is currently assisted and "
+                "requires activation."
+            ),
+        },
+        status_code=403,
+    )
+
+
+if PUBLIC_FACADE_ENABLED:
+    app = mcp.streamable_http_app()
+    app.add_route("/healthz", healthz, methods=["GET"])
+else:
+    app = Starlette(
+        routes=[
+            Route("/healthz", healthz, methods=["GET"]),
+            Route("/{path:path}", closed, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]),
+        ]
+    )
+
 
 if __name__ == "__main__":
     core._ensure_output_dir()
