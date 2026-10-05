@@ -5,6 +5,10 @@ Examples:
     --quota-minutes 120 --days 7 --max-concurrency 1
 
   python tenant_admin.py usage --id acme-trial
+  python tenant_admin.py rotate-key --id acme-trial
+  python tenant_admin.py update --id acme-trial --plan pro --quota-minutes 600
+  python tenant_admin.py suspend --id acme-trial
+  python tenant_admin.py activate --id acme-trial
 """
 from __future__ import annotations
 
@@ -39,6 +43,27 @@ def main() -> None:
     usage = sub.add_parser("usage")
     usage.add_argument("--id", required=True)
 
+    rotate = sub.add_parser("rotate-key")
+    rotate.add_argument("--id", required=True)
+
+    update = sub.add_parser("update")
+    update.add_argument("--id", required=True)
+    update.add_argument("--name")
+    update.add_argument("--plan")
+    update.add_argument("--quota-minutes", type=float)
+    update.add_argument("--days", type=int)
+    update.add_argument("--max-concurrency", type=int)
+
+    suspend = sub.add_parser("suspend")
+    suspend.add_argument("--id", required=True)
+
+    activate = sub.add_parser("activate")
+    activate.add_argument("--id", required=True)
+
+    events = sub.add_parser("events")
+    events.add_argument("--id", required=True)
+    events.add_argument("--limit", type=int, default=50)
+
     args = parser.parse_args()
     store = _store()
 
@@ -67,7 +92,53 @@ def main() -> None:
         }, indent=2))
         return
 
-    print(json.dumps(store.usage_summary(args.id), indent=2))
+    if args.command == "usage":
+        print(json.dumps(store.usage_summary(args.id), indent=2))
+        return
+
+    if args.command == "rotate-key":
+        api_key = store.rotate_api_key(args.id)
+        # Printed once; only the SHA-256 digest is stored in the ledger.
+        print(json.dumps({"tenant_id": args.id, "api_key": api_key}, indent=2))
+        return
+
+    if args.command == "update":
+        expires_at = None
+        set_expires_at = args.days is not None
+        if args.days is not None and args.days > 0:
+            expires_at = datetime.now(timezone.utc) + timedelta(days=args.days)
+        tenant = store.update_tenant(
+            args.id,
+            name=args.name,
+            plan=args.plan,
+            quota_seconds=None if args.quota_minutes is None else args.quota_minutes * 60,
+            expires_at=expires_at,
+            set_expires_at=set_expires_at,
+            max_concurrency=args.max_concurrency,
+        )
+        print(json.dumps({
+            "tenant_id": tenant.id,
+            "name": tenant.name,
+            "plan": tenant.plan,
+            "quota_seconds": tenant.quota_seconds,
+            "expires_at": tenant.expires_at.isoformat() if tenant.expires_at else None,
+            "max_concurrency": tenant.max_concurrency,
+            "active": tenant.active,
+        }, indent=2))
+        return
+
+    if args.command in {"suspend", "activate"}:
+        tenant = store.set_active(args.id, args.command == "activate")
+        print(json.dumps({
+            "tenant_id": tenant.id,
+            "active": tenant.active,
+            "plan": tenant.plan,
+        }, indent=2))
+        return
+
+    if args.command == "events":
+        print(json.dumps(store.lifecycle_events(args.id, args.limit), indent=2))
+        return
 
 
 if __name__ == "__main__":

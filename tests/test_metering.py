@@ -9,6 +9,7 @@ from metering import (
     QuotaExceeded,
     RequestIdRequired,
     TrialExpired,
+    TenantUnauthorized,
 )
 
 
@@ -131,6 +132,66 @@ class MeteringTests(unittest.TestCase):
         summary = self.store.usage_summary(self.tenant.id)
         self.assertEqual(summary["used_seconds"], 120)
         self.assertEqual(summary["failed_calls"], 1)
+
+    def test_rotate_key_revokes_old_key(self):
+        old_key = self.api_key
+        new_key = self.store.rotate_api_key(self.tenant.id)
+        self.assertNotEqual(old_key, new_key)
+        with self.assertRaises(TenantUnauthorized):
+            self.store.get_tenant_by_api_key(old_key)
+        loaded = self.store.get_tenant_by_api_key(new_key)
+        self.assertEqual(loaded.id, self.tenant.id)
+
+    def test_suspend_and_activate_control_auth(self):
+        self.store.set_active(self.tenant.id, False)
+        with self.assertRaises(TenantUnauthorized):
+            self.store.get_tenant_by_api_key(self.api_key)
+        restored = self.store.set_active(self.tenant.id, True)
+        self.assertTrue(restored.active)
+        self.assertEqual(
+            self.store.get_tenant_by_api_key(self.api_key).id,
+            self.tenant.id,
+        )
+
+    def test_upgrade_preserves_usage_history(self):
+        reservation = self.store.reserve(
+            self.tenant,
+            tool="transcribe_base64",
+            source="a.wav",
+            seconds=30,
+            request_id="before-upgrade",
+        )
+        self.store.complete(reservation, 30)
+        upgraded = self.store.update_tenant(
+            self.tenant.id,
+            plan="pro",
+            quota_seconds=600,
+            max_concurrency=3,
+            expires_at=None,
+            set_expires_at=True,
+        )
+        self.assertEqual(upgraded.plan, "pro")
+        self.assertEqual(upgraded.quota_seconds, 600)
+        self.assertEqual(upgraded.max_concurrency, 3)
+        self.assertIsNone(upgraded.expires_at)
+        summary = self.store.usage_summary(self.tenant.id)
+        self.assertEqual(summary["used_seconds"], 30)
+        self.assertEqual(summary["plan"], "pro")
+        self.assertEqual(summary["max_concurrency"], 3)
+
+    def test_lifecycle_events_never_store_plaintext_key(self):
+        new_key = self.store.rotate_api_key(self.tenant.id)
+        self.store.update_tenant(self.tenant.id, plan="cloud")
+        self.store.set_active(self.tenant.id, False)
+        events = self.store.lifecycle_events(self.tenant.id)
+        serialized = repr(events)
+        self.assertNotIn(self.api_key, serialized)
+        self.assertNotIn(new_key, serialized)
+        event_types = {event["event_type"] for event in events}
+        self.assertTrue(
+            {"tenant_created", "api_key_rotated", "tenant_updated", "tenant_suspended"}
+            <= event_types
+        )
 
     def test_expired_tenant_is_rejected(self):
         expired, key = self.store.create_tenant(
