@@ -62,17 +62,25 @@ auth, SSRF guards, and a Docker MCP Toolkit catalog entry.
 
 | Tool | Source | Notes |
 |---|---|---|
-| `transcribe_file(path, format, language?, request_id?)` | Local audio/video file | Path must resolve under `ALLOWED_INPUT_ROOTS` |
-| `transcribe_base64(filename, data_base64, format, language?, request_id?)` | Inline attachment bytes | Capped by `MAX_INLINE_BYTES` |
-| `transcribe_batch(paths, format, language?, concurrency?, request_id?)` | Multiple local files | Bounded count/size/concurrency |
-| `transcribe_zip(path, format, language?, concurrency?, request_id?)` | Local ZIP containing media | Safe basename extraction; symlink/zip-bomb guards |
-| `transcribe_zip_base64(filename, data_base64, format, language?, concurrency?, request_id?)` | Inline ZIP attachment bytes | Same ZIP safety gates; pre-decode size cap; archive/member SHA-256 manifest |
-| `transcribe_url(url, format, language?, request_id?)` | Direct http(s) URL | Public hosts only |
-| `transcribe_youtube(url, format, language?, request_id?)` | YouTube (yt-dlp) | URL validated *before* yt-dlp runs |
-| `transcribe_podcast(rss_url, episode_index, format, language?, request_id?)` | RSS feed episode | Audio enclosure preferred; video fallback |
+| `transcribe_file(path, format, language?, request_id?, prompt?, carry_initial_prompt?)` | Local audio/video file | Path must resolve under `ALLOWED_INPUT_ROOTS` |
+| `transcribe_base64(filename, data_base64, format, language?, request_id?, prompt?, carry_initial_prompt?)` | Inline attachment bytes | Capped by `MAX_INLINE_BYTES` |
+| `transcribe_batch(paths, format, language?, concurrency?, request_id?, prompt?, carry_initial_prompt?)` | Multiple local files | Bounded count/size/concurrency |
+| `transcribe_zip(path, format, language?, concurrency?, request_id?, prompt?, carry_initial_prompt?)` | Local ZIP containing media | Safe basename extraction; symlink/zip-bomb guards |
+| `transcribe_zip_base64(filename, data_base64, format, language?, concurrency?, request_id?, prompt?, carry_initial_prompt?)` | Inline ZIP attachment bytes | Same ZIP safety gates; pre-decode size cap; archive/member SHA-256 manifest |
+| `transcribe_url(url, format, language?, request_id?, prompt?, carry_initial_prompt?)` | Direct http(s) URL | Public hosts only |
+| `transcribe_youtube(url, format, language?, request_id?, prompt?, carry_initial_prompt?)` | YouTube (yt-dlp) | URL validated *before* yt-dlp runs |
+| `transcribe_podcast(rss_url, episode_index, format, language?, request_id?, prompt?, carry_initial_prompt?)` | RSS feed episode | Audio enclosure preferred; video fallback |
 
 **Formats:** `text` · `json` · `srt` · `vtt` · `md`. The `md`/`srt`/`vtt` formats
 write a file to `OUTPUT_DIR` and return its path; `text`/`json` return inline.
+
+**Request context:** every transcription tool accepts an optional `prompt` for
+domain vocabulary, names, acronyms and expected context. `carry_initial_prompt`
+forwards whisper.cpp's carry behavior for longer decoding windows. Prompts are
+request-scoped: Blue Transcription does not add them to usage events, ZIP/batch
+manifests or transcript metadata. The operator-defined `MAX_PROMPT_CHARS`
+protects the backend from oversized prompt payloads.
+
 
 ## Quick start
 
@@ -133,6 +141,7 @@ All knobs are environment variables (see `.env.example`):
 | `MAX_BATCH_ITEM_BYTES` | `262144000` (250MB) | Per-item limit for batch/ZIP |
 | `MAX_ZIP_EXTRACT_BYTES` | `1073741824` (1GiB) | Aggregate uncompressed ZIP cap |
 | `MAX_ZIP_ENTRIES` | `5000` | Maximum central-directory entries accepted in a ZIP |
+| `MAX_PROMPT_CHARS` | `1024` | Maximum request-scoped Whisper prompt length in characters |
 | `METERING_ENABLED` | `0` | Enable tenant API keys, quotas and usage accounting |
 | `METERING_DB` | `/data/metering/metering.sqlite3` | SQLite usage ledger path |
 | `METERING_REQUIRE_REQUEST_ID` | `1` | Require stable request IDs for idempotent tenant charging |
